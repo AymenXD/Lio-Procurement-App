@@ -9,6 +9,11 @@ import { CatalogSuggestions } from '@/components/CatalogSuggestions';
 import { CommodityGroupPicker } from '@/components/CommodityGroupPicker';
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024; // same limit as the backend
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+// Same formula as the server, which ignores totals sent by the browser.
+const lineTotal = (l: { unitPrice: number; amount: number }) => round2(l.unitPrice * l.amount);
+const usd = (n: number) => `$${n.toLocaleString('en-US')}`;
 const NOT_FOUND = 'Not found or unclear on the quote. Please fill in or check.';
 
 interface OrderLine {
@@ -45,7 +50,18 @@ export default function NewRequestPage() {
   }, []);
   const [commodityGroupId, setCommodityGroupId] = useState<number | null>(null);
   const [orderLines, setOrderLines] = useState<OrderLine[]>([]);
-  const [totalCost, setTotalCost] = useState<number>(0);
+  const [taxAmount, setTaxAmount] = useState<number>(0);
+  const subtotal = round2(orderLines.reduce((sum, l) => sum + lineTotal(l), 0));
+  const totalCost = round2(subtotal + taxAmount);
+
+  // The org's auto-approval policy, to tell the requester before submitting.
+  const [autoApproval, setAutoApproval] = useState<api.AutoApprovalPolicy | null>(null);
+  useEffect(() => {
+    api.organizations
+      .getSettings()
+      .then((s) => setAutoApproval(s.auto_approval ?? null))
+      .catch(() => {}); // only a hint; the server decides
+  }, []);
 
   // UI state
   const [file, setFile] = useState<File | null>(null);
@@ -115,7 +131,6 @@ export default function NewRequestPage() {
         totalPrice: unitPrice * amount, articleId: q.get('articleId'),
         quotedUnitPrice: quoted > 0 ? quoted : null },
     ]);
-    setTotalCost(unitPrice * amount);
     const groupId = Number(q.get('commodityGroupId'));
     if (groupId) setCommodityGroupId(groupId);
     setSuccess('Prefilled from the catalog with the negotiated price. Review and submit.');
@@ -126,7 +141,7 @@ export default function NewRequestPage() {
   const [appliedRule, setAppliedRule] = useState<api.AppliedBookingRule | null>(null);
   const groupRef = useRef(commodityGroupId);
   groupRef.current = commodityGroupId;
-  const linesKey = orderLines.map((l) => `${l.positionDescription}|${l.totalPrice}`).join('\n');
+  const linesKey = orderLines.map((l) => `${l.positionDescription}|${lineTotal(l)}`).join('\n');
 
   useEffect(() => {
     if (orderLines.length === 0) {
@@ -136,7 +151,7 @@ export default function NewRequestPage() {
     const timer = setTimeout(async () => {
       try {
         const { rule } = await api.requests.bookingRulePreview(
-          orderLines.map((l) => ({ description: l.positionDescription, total_price: l.totalPrice }))
+          orderLines.map((l) => ({ description: l.positionDescription, total_price: lineTotal(l) }))
         );
         setAppliedRule(rule);
         if (rule) {
@@ -212,7 +227,7 @@ export default function NewRequestPage() {
       const dept = profileDepartment || extracted.department || '';
       setDepartment(dept);
       setOrderLines(extracted.orderLines || []);
-      setTotalCost(extracted.totalCost || 0);
+      setTaxAmount(extracted.taxAmount || 0);
       
       // Set commodity group (now included in extraction)
       if (extracted.commodityGroupId) {
@@ -279,19 +294,12 @@ export default function NewRequestPage() {
     }
     
     setOrderLines(updated);
-    
-    // Update total cost
-    const newTotal = updated.reduce((sum, line) => sum + line.totalPrice, 0);
-    setTotalCost(newTotal);
   };
 
   // Remove order line
   const removeOrderLine = (index: number) => {
     setSuggestions([]); // positions change; "Check catalog prices" reloads them
-    const updated = orderLines.filter((_, i) => i !== index);
-    setOrderLines(updated);
-    const newTotal = updated.reduce((sum, line) => sum + line.totalPrice, 0);
-    setTotalCost(newTotal);
+    setOrderLines(orderLines.filter((_, i) => i !== index));
   };
 
   // Submit form
@@ -323,8 +331,9 @@ export default function NewRequestPage() {
         vatId,
         commodityGroupId: commodityGroupId,
         totalCost,
+        taxAmount,
         department,
-        orderLines,
+        orderLines: orderLines.map((l) => ({ ...l, totalPrice: lineTotal(l) })),
       });
 
       // Attach the original PDF (if one was uploaded) so it shows on the detail page.
@@ -598,7 +607,7 @@ export default function NewRequestPage() {
                   <div className="mt-2 text-right">
                     <span className="text-sm text-gray-600">Total: </span>
                     <span className="text-lg font-semibold tracking-tight text-ink">
-                      ${line.totalPrice.toFixed(2)}
+                      ${lineTotal(line).toFixed(2)}
                     </span>
                   </div>
 
@@ -614,14 +623,45 @@ export default function NewRequestPage() {
           )}
         </div>
 
-        {/* Total Cost */}
-        <div className="bg-accent-soft/20 border-2 border-accent/40 rounded-lg p-6">
-          <div className="flex items-center justify-between">
+        {/* Total Cost: lines + tax, computed (the server recomputes it the same way) */}
+        <div className="bg-accent-soft/20 border-2 border-accent/40 rounded-lg p-6 space-y-3">
+          <div className="flex items-center justify-between text-sm text-gray-700">
+            <span>Order lines</span>
+            <span className="font-medium">${subtotal.toFixed(2)}</span>
+          </div>
+          <div className="flex items-center justify-between gap-4 text-sm text-gray-700">
+            <label htmlFor="tax-amount">Tax ($)</label>
+            <div className="w-40">
+              <Input
+                id="tax-amount"
+                type="number"
+                step="0.01"
+                min="0"
+                value={taxAmount}
+                onChange={(e) => setTaxAmount(Math.max(0, parseFloat(e.target.value) || 0))}
+                className="text-right bg-white"
+              />
+            </div>
+          </div>
+          <div className="flex items-center justify-between border-t border-accent/30 pt-3">
             <span className="text-lg font-medium text-gray-900">Total Cost</span>
             <span className="text-3xl font-bold text-accent-deep">
               ${totalCost.toFixed(2)}
             </span>
           </div>
+          {autoApproval?.enabled && orderLines.length > 0 && (
+            <p
+              className={`rounded-lg px-3 py-2 text-sm ${
+                totalCost < autoApproval.below_amount
+                  ? 'bg-green-50 text-green-800'
+                  : 'border border-line bg-white text-gray-700'
+              }`}
+            >
+              {totalCost < autoApproval.below_amount
+                ? `✓ Under ${usd(autoApproval.below_amount)}: this request will be approved automatically.`
+                : `Needs a buyer's approval: the total is ${usd(autoApproval.below_amount)} or more.`}
+            </p>
+          )}
         </div>
 
         {/* Submit */}

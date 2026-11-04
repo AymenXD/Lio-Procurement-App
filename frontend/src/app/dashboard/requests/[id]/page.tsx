@@ -18,9 +18,12 @@ const APPROVAL_BADGE: Record<string, string> = {
   rejected: 'bg-red-100 text-red-700',
   pending: 'bg-amber-100 text-amber-800',
 };
+const AUTO_BADGE = 'bg-accent-soft/40 text-accent-deep';
 const titleCase = (s: string) => s.replace('_', ' ').replace(/\b\w/g, (l) => l.toUpperCase());
-const usd = (n: number | null) =>
-  `$${(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+const usd = (n: number | string | null | undefined) =>
+  `$${(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const isAuto = (r: ProcurementRequestWithDetails) =>
+  r.approval_status === 'approved' && r.approval_source === 'auto';
 
 export default function RequestDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -39,7 +42,7 @@ export default function RequestDetailPage() {
   // Edit form state
   const [form, setForm] = useState({
     requestorName: '', title: '', vendorName: '', vatId: '', department: '',
-    commodityGroupId: null as number | null, totalCost: 0,
+    commodityGroupId: null as number | null, taxAmount: 0,
   });
 
   const load = async () => {
@@ -126,7 +129,7 @@ export default function RequestDetailPage() {
       vatId: request.vat_id || '',
       department: request.department || '',
       commodityGroupId: request.commodity_group_id,
-      totalCost: request.total_cost || 0,
+      taxAmount: Number(request.tax_amount) || 0,
     });
     setEditing(true);
   };
@@ -141,7 +144,7 @@ export default function RequestDetailPage() {
         vendorName: form.vendorName,
         vatId: form.vatId,
         commodityGroupId: form.commodityGroupId || 0,
-        totalCost: form.totalCost,
+        taxAmount: form.taxAmount,
         department: form.department,
         orderLines: (request.order_lines || []).map((l) => ({
           positionDescription: l.position_description,
@@ -185,6 +188,17 @@ export default function RequestDetailPage() {
   }
 
   const canApprove = (role === 'buyer' || role === 'admin') && request.approval_status === 'pending';
+  // Same as the server: stored line totals + tax.
+  const linesSubtotal = (request.order_lines || []).reduce((sum, l) => sum + Number(l.total_price), 0);
+  const editTotal = Math.round((linesSubtotal + form.taxAmount) * 100) / 100;
+  const decidedOn = request.approved_at
+    ? ` on ${new Date(request.approved_at).toLocaleDateString('en-US')}`
+    : '';
+  const approvalText = isAuto(request)
+    ? `Automatically, by policy${decidedOn}`
+    : request.approval_status === 'pending'
+      ? 'Waiting for a buyer'
+      : `${titleCase(request.approval_status)} by a buyer${decidedOn}`;
 
   return (
     <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -200,8 +214,8 @@ export default function RequestDetailPage() {
             <span className={`inline-flex px-2.5 py-1 text-xs font-semibold rounded-full ${STATUS_BADGE[request.status]}`}>
               {titleCase(request.status)}
             </span>
-            <span className={`inline-flex px-2.5 py-1 text-xs font-semibold rounded-full ${APPROVAL_BADGE[request.approval_status]}`}>
-              {titleCase(request.approval_status)}
+            <span className={`inline-flex px-2.5 py-1 text-xs font-semibold rounded-full ${isAuto(request) ? AUTO_BADGE : APPROVAL_BADGE[request.approval_status]}`}>
+              {isAuto(request) ? 'Auto-approved' : titleCase(request.approval_status)}
             </span>
           </div>
         </div>
@@ -257,6 +271,8 @@ export default function RequestDetailPage() {
                   ? `${request.commodity_groups.category} · ${request.commodity_groups.name}`
                   : '—'}
               />
+              <Field label="Approval" value={approvalText} />
+              <Field label="Tax" value={usd(request.tax_amount)} />
               <Field label="Total Cost" value={usd(request.total_cost)} />
             </dl>
           </div>
@@ -352,9 +368,20 @@ export default function RequestDetailPage() {
                   required
                 />
               </div>
-              <Input label="Total Cost ($) *" type="number" step="0.01" value={form.totalCost}
-                onChange={(e) => setForm({ ...form, totalCost: parseFloat(e.target.value) || 0 })} />
+              <div className="grid grid-cols-2 gap-4">
+                <Input label="Tax ($)" type="number" step="0.01" min="0" value={form.taxAmount}
+                  onChange={(e) =>
+                    setForm({ ...form, taxAmount: Math.max(0, parseFloat(e.target.value) || 0) })
+                  } />
+                <Input label="Total Cost ($)" value={editTotal.toFixed(2)} readOnly
+                  helperText="Order lines + tax, calculated" className="bg-ink-800/[0.03]" />
+              </div>
               <p className="text-xs text-ink/45">Order lines are edited from the request creation flow.</p>
+              {request.approval_status === 'approved' && (
+                <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  Changing the vendor, tax ID, lines or tax sends this request back for approval.
+                </p>
+              )}
             </div>
             <div className="border-t border-line p-6 bg-ink-800/[0.02] flex gap-3">
               <Button onClick={saveEdit} loading={busy} disabled={busy} className="flex-1">Save Changes</Button>

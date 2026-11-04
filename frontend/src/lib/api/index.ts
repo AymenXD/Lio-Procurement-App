@@ -54,9 +54,16 @@ export interface BookingRule {
   max_total: number | null; // rule applies only if the request total is below this
 }
 
+// Requests whose total is below `below_amount` are approved without a buyer.
+export interface AutoApprovalPolicy {
+  enabled: boolean;
+  below_amount: number;
+}
+
 export interface OrganizationSettings {
   required_fields: ConfigurableRequiredField[];
   booking_rules: BookingRule[];
+  auto_approval?: AutoApprovalPolicy;
 }
 
 export interface AppliedBookingRule {
@@ -87,7 +94,8 @@ export interface CreateRequestInput {
   vendorName: string;
   vatId: string;
   commodityGroupId: number;
-  totalCost: number;
+  totalCost?: number; // ignored by the server, which computes lines + tax
+  taxAmount: number | null;
   department: string;
   orderLines: OrderLineInput[];
 }
@@ -98,7 +106,8 @@ export interface UpdateRequestInput {
   vendorName: string;
   vatId: string;
   commodityGroupId: number;
-  totalCost: number;
+  totalCost?: number; // ignored by the server, which computes lines + tax
+  taxAmount: number | null;
   department: string;
   orderLines: OrderLineInput[];
 }
@@ -109,6 +118,7 @@ export interface ExtractedVendorData {
   vatId: string;
   department: string;
   orderLines: OrderLineInput[];
+  taxAmount?: number;
   totalCost: number;
   commodityGroupId: number | null;
   commodityGroupName: string | null;
