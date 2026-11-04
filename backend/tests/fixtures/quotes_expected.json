@@ -1,0 +1,58 @@
+{
+  "_about": [
+    "Ground truth for the five Acme problem quotes (workspace folder ../quotes/).",
+    "Read by scripts/eval_extraction.py. Values were checked by hand against each PDF.",
+    "Money is a decimal string. tax_id null means the quote prints none.",
+    "line_totals: every priced line incl. shipping and fees, in any order. Alternatives,",
+    "  headings, upsells and subtotals must NOT appear, so an extra or missing amount fails.",
+    "tax is not scored; it keeps the fixture honest: sum(line_totals) + tax == total.",
+    "commodity_group_ids: accepted ids (ambiguous items may list more than one)."
+  ],
+  "quotes": [
+    {
+      "file": "QT-4120-Cust-14918.pdf",
+      "vendor_names": ["Greenmantle Moss Studio, LLC"],
+      "tax_id": "85-3252405",
+      "line_totals": ["715.26", "622.00", "215.00"],
+      "tax": "133.88",
+      "total": "1686.14",
+      "commodity_group_ids": [15]
+    },
+    {
+      "file": "QT-OF2312380-Cust-57692.pdf",
+      "vendor_names": ["Bloomcraft Interiors, Inc."],
+      "tax_id": "27-1073640",
+      "line_totals": ["716.56", "120.49", "350.00", "113.85"],
+      "tax": "112.20",
+      "total": "1413.10",
+      "commodity_group_ids": [15]
+    },
+    {
+      "file": "QuoteA0492_23.Pdf",
+      "vendor_names": ["Hollis Greenscapes"],
+      "tax_id": "94-1985704",
+      "line_totals": ["1560.00", "320.00"],
+      "tax": "162.15",
+      "total": "2042.15",
+      "commodity_group_ids": [15]
+    },
+    {
+      "file": "Quote_1__Lio_Technologies_Inc__1x_MBA___2214703918.pdf",
+      "vendor_names": ["Apple", "Apple Inc."],
+      "tax_id": "94-2404110",
+      "line_totals": ["1409.06", "4.00"],
+      "tax": "121.53",
+      "total": "1534.59",
+      "commodity_group_ids": [29]
+    },
+    {
+      "file": "Quote_Hartwell_Cleveland_ACME_Grinding_Machine.pdf",
+      "vendor_names": ["Hartwell Industrial Tools, Inc."],
+      "tax_id": null,
+      "line_totals": ["15000.00", "2000.00"],
+      "tax": "1402.50",
+      "total": "18402.50",
+      "commodity_group_ids": [45]
+    }
+  ]
+}

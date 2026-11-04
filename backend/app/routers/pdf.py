@@ -23,6 +23,12 @@ async def parse_pdf(file: UploadFile) -> PdfParseResponse:
             detail="PDF exceeds the 10MB limit",
         )
 
+    # The browser-reported type can be faked; a real PDF always starts with "%PDF-".
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="This file is not a valid PDF"
+        )
+
     try:
         text = extract_text(pdf_bytes)
     except Exception:  # noqa: BLE001 — mirror the original catch-all

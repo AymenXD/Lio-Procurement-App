@@ -100,6 +100,7 @@ export interface ExtractionResponse {
   data?: ExtractedVendorData;
   error?: string;
   missingFields?: string[];
+  warnings?: string[]; // numbers that don't add up
 }
 
 export interface Supplier {

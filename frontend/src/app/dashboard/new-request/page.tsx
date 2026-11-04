@@ -1,11 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMutation } from '@tanstack/react-query';
 import * as api from '@/lib/api';
 import { useCommodityGroups } from '@/lib/hooks/useCommodityGroups';
 import { Button, Input, Alert, Loader } from '@/components/base';
+
+const MAX_PDF_BYTES = 10 * 1024 * 1024; // same limit as the backend
+const NOT_FOUND = 'Not found or unclear on the quote. Please fill in or check.';
 
 interface OrderLine {
   positionDescription: string;
@@ -25,6 +28,19 @@ export default function NewRequestPage() {
   const [vendorName, setVendorName] = useState('');
   const [vatId, setVatId] = useState('');
   const [department, setDepartment] = useState('');
+  const [profileDepartment, setProfileDepartment] = useState('');
+
+  // The requestor is the logged-in user: their name and department aren't on the quote.
+  useEffect(() => {
+    api.auth
+      .me()
+      .then(({ profile }) => {
+        setRequestorName((name) => name || profile.full_name || '');
+        setProfileDepartment(profile.department || '');
+        setDepartment((dept) => dept || profile.department || '');
+      })
+      .catch(() => {}); // not critical: the fields stay editable
+  }, []);
   const [commodityGroupId, setCommodityGroupId] = useState<number | null>(null);
   const [orderLines, setOrderLines] = useState<OrderLine[]>([]);
   const [totalCost, setTotalCost] = useState<number>(0);
@@ -35,6 +51,11 @@ export default function NewRequestPage() {
   const [success, setSuccess] = useState('');
   const [warning, setWarning] = useState('');
   const [extracting, setExtracting] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  // Fields the extraction flagged; each highlight clears once the user edits that field.
+  const [missing, setMissing] = useState<string[]>([]);
+  const flag = (field: string) => (missing.includes(field) ? NOT_FOUND : undefined);
+  const unflag = (field: string) => setMissing((m) => m.filter((f) => f !== field));
 
   // PDF parsing mutation
   const parsePDFMutation = useMutation({
@@ -50,6 +71,8 @@ export default function NewRequestPage() {
   // Handle file upload and extraction
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const uploadedFile = e.target.files?.[0];
+    // Reset the input so re-selecting the same file (e.g. after an error) triggers again.
+    e.target.value = '';
     if (!uploadedFile) return;
 
     if (uploadedFile.type !== 'application/pdf') {
@@ -57,7 +80,13 @@ export default function NewRequestPage() {
       return;
     }
 
-    setFile(uploadedFile);
+    if (uploadedFile.size > MAX_PDF_BYTES) {
+      setError('This PDF is larger than 10 MB. Please upload a smaller file.');
+      return;
+    }
+
+    setFile(null);
+    setMissing([]);
     setError('');
     setSuccess('');
     setWarning('');
@@ -66,6 +95,8 @@ export default function NewRequestPage() {
     try {
       // Step 1: Parse PDF
       const pdfText = await parsePDFMutation.mutateAsync(uploadedFile);
+      // Valid PDF: keep it for attaching, even if the AI step below fails.
+      setFile(uploadedFile);
 
       // Step 2: Extract structured data AND classify commodity group in one AI call
       const extractionResult = await api.extraction.extract(pdfText);
@@ -80,7 +111,9 @@ export default function NewRequestPage() {
       setTitle(extracted.title || '');
       setVendorName(extracted.vendorName || '');
       setVatId(extracted.vatId || '');
-      setDepartment(extracted.department || '');
+      // Department: the user's own first, then the one printed on the quote.
+      const dept = profileDepartment || extracted.department || '';
+      setDepartment(dept);
       setOrderLines(extracted.orderLines || []);
       setTotalCost(extracted.totalCost || 0);
       
@@ -89,11 +122,24 @@ export default function NewRequestPage() {
         setCommodityGroupId(extracted.commodityGroupId);
       }
 
-      // Show warnings for missing fields
-      if (extractionResult.missingFields && extractionResult.missingFields.length > 0) {
-        setWarning(
-          `⚠️ Could not extract: ${extractionResult.missingFields.join(', ')}. Please fill in these fields manually.`
+      // Department isn't missing if the profile filled it.
+      const missingFields = (extractionResult.missingFields ?? []).filter(
+        (f) => !(f === 'Department' && dept)
+      );
+      setMissing(missingFields);
+
+      // Show warnings for missing fields and for numbers that don't add up
+      const notes: string[] = [];
+      if (missingFields.length > 0) {
+        notes.push(
+          `⚠️ Could not extract: ${missingFields.join(', ')}. Please fill in these fields manually.`
         );
+      }
+      for (const note of extractionResult.warnings ?? []) {
+        notes.push(`⚠️ Please check: ${note}.`);
+      }
+      if (notes.length > 0) {
+        setWarning(notes.join('\n'));
       }
 
       setSuccess('✓ PDF extracted successfully! Review and submit.');
@@ -166,6 +212,7 @@ export default function NewRequestPage() {
       return;
     }
 
+    setSubmitting(true); // blocks double-clicks from creating duplicate requests
     try {
       const created = await api.requests.create({
         requestorName,
@@ -194,6 +241,7 @@ export default function NewRequestPage() {
         router.refresh();
       }, 1500);
     } catch (err) {
+      setSubmitting(false); // on success it stays disabled until the redirect
       setError(err instanceof Error ? err.message : 'Failed to create request');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -210,7 +258,7 @@ export default function NewRequestPage() {
       </div>
 
       {error && <Alert variant="error" className="mb-6">{error}</Alert>}
-      {warning && <Alert variant="warning" className="mb-6">{warning}</Alert>}
+      {warning && <Alert variant="warning" className="mb-6 whitespace-pre-line">{warning}</Alert>}
       {success && <Alert variant="success" className="mb-6">{success}</Alert>}
 
       <form onSubmit={handleSubmit} className="space-y-8">
@@ -295,7 +343,8 @@ export default function NewRequestPage() {
             <Input
               label="Department"
               value={department}
-              onChange={(e) => setDepartment(e.target.value)}
+              onChange={(e) => { setDepartment(e.target.value); unflag('Department'); }}
+              error={flag('Department')}
               placeholder="IT Department"
             />
           </div>
@@ -303,7 +352,8 @@ export default function NewRequestPage() {
           <Input
             label="Title / Short Description *"
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => { setTitle(e.target.value); unflag('Title/Short Description'); }}
+            error={flag('Title/Short Description')}
             required
             placeholder="Adobe Creative Cloud Subscription"
           />
@@ -317,7 +367,8 @@ export default function NewRequestPage() {
             <Input
               label="Vendor Name *"
               value={vendorName}
-              onChange={(e) => setVendorName(e.target.value)}
+              onChange={(e) => { setVendorName(e.target.value); unflag('Vendor Name'); }}
+              error={flag('Vendor Name')}
               required
               placeholder="Adobe Systems"
             />
@@ -325,7 +376,8 @@ export default function NewRequestPage() {
             <Input
               label="Tax ID"
               value={vatId}
-              onChange={(e) => setVatId(e.target.value)}
+              onChange={(e) => { setVatId(e.target.value); unflag('Tax ID'); }}
+              error={flag('Tax ID')}
               placeholder="12-3456789"
             />
           </div>
@@ -336,9 +388,9 @@ export default function NewRequestPage() {
             </label>
             <select
               value={commodityGroupId || ''}
-              onChange={(e) => setCommodityGroupId(Number(e.target.value))}
+              onChange={(e) => { setCommodityGroupId(Number(e.target.value)); unflag('Commodity Group'); }}
               required
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-gray-900 focus:ring-2 focus:ring-accent-deep/60 focus:border-accent-deep/40"
+              className={`w-full px-3 py-2 border rounded-lg text-gray-900 focus:ring-2 focus:ring-accent-deep/60 focus:border-accent-deep/40 ${flag('Commodity Group') ? 'border-red-500' : 'border-gray-300'}`}
             >
               <option value="">
                 {commodityGroups ? 'Select a commodity group' : 'Loading...'}
@@ -455,8 +507,8 @@ export default function NewRequestPage() {
           >
             Cancel
           </Button>
-          <Button type="submit" size="lg">
-            Create Request
+          <Button type="submit" size="lg" loading={submitting}>
+            {submitting ? 'Creating…' : 'Create Request'}
           </Button>
         </div>
       </form>
