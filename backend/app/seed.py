@@ -91,9 +91,17 @@ def seed_auto_approval(db: Session, organization: Organization) -> int:
     return 1
 
 
-# Demo profile departments, prefilled on New Request. The other accounts stay empty,
-# so the demo also shows the fallback to the department extracted from the quote.
-DEMO_DEPARTMENTS = {"requester@acme.com": "Facilities"}
+# Demo profile departments, prefilled on New Request. Users created later (sign-up,
+# invites) start empty and fall back to the department extracted from the quote.
+DEMO_DEPARTMENTS = {
+    "admin@acme.com": "Administration",
+    "buyer@acme.com": "Procurement",
+    "requester@acme.com": "Facilities",
+    "admin@walmart.com": "Administration",
+    "admin@schaeffler.com": "Administration",
+    "admin@siemens.com": "Administration",
+    "admin@bmw.com": "Administration",
+}
 
 
 def seed_demo_departments(db: Session) -> int:

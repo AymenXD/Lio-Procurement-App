@@ -9,6 +9,7 @@ Only extracted fields are printed, never document text.
 """
 
 import json
+import logging
 import re
 import sys
 from decimal import Decimal
@@ -108,4 +109,8 @@ def main(quotes_dir: Path) -> None:
 
 
 if __name__ == "__main__":
+    # Show the per-call AI logs (duration, prompt/completion tokens), not HTTP noise.
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    for noisy in ("httpx", "openai"):  # per-request lines; our own log has what matters
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     main(Path(sys.argv[1] if len(sys.argv) > 1 else "/quotes"))
