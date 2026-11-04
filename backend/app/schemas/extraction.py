@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -34,6 +36,12 @@ class OrderLineData(BaseModel):
     _nulls_to_defaults = model_validator(mode="before")(_drop_nulls)
 
 
+class SkippedLineData(OrderLineData):
+    """A priced row the AI labelled as not part of the order (e.g. an alternative)."""
+
+    kind: str
+
+
 class ExtractedVendorData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -52,9 +60,16 @@ class ExtractedVendorData(BaseModel):
     _nulls_to_defaults = model_validator(mode="before")(_drop_nulls)
 
 
+# The AI labels every row of the price table; our code decides which kinds count.
+RowKind = Literal[
+    "item", "shipping", "fee", "alternative", "optional", "subtotal", "heading", "tax"
+]
+
+
 # What the AI must return, enforced by OpenAI Structured Outputs: every key present,
 # null allowed, numbers must be numbers. Converted into ExtractedVendorData afterwards.
 class QuoteLine(BaseModel):
+    kind: RowKind
     position_description: str | None = Field(alias="positionDescription")
     unit_price: float | None = Field(alias="unitPrice")
     amount: float | None
@@ -71,8 +86,15 @@ class QuoteExtraction(BaseModel):
     order_lines: list[QuoteLine] = Field(alias="orderLines")
     tax_amount: float | None = Field(alias="taxAmount")
     total_cost: float | None = Field(alias="totalCost")
+    # Step 1 of classification: one of the ~22 categories. The group is picked in a
+    # second, small call among that category's groups (services/classification.py).
+    commodity_category: str | None = Field(alias="commodityCategory")
+
+
+class GroupChoice(BaseModel):
+    """Step 2 of classification: one group id from the chosen category's list."""
+
     commodity_group_id: int | None = Field(alias="commodityGroupId")
-    commodity_group_name: str | None = Field(alias="commodityGroupName")
 
 
 class ExtractionResponse(BaseModel):
@@ -86,3 +108,5 @@ class ExtractionResponse(BaseModel):
     warnings: list[str] | None = None
     # Label of the org booking rule that set the commodity group, if any.
     applied_rule: str | None = Field(default=None, alias="appliedRule")
+    # Priced rows left out of the order, shown so the user can add one back.
+    skipped_lines: list[SkippedLineData] | None = Field(default=None, alias="skippedLines")
