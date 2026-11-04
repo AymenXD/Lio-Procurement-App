@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, status
 from sqlalchemy import select
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.deps import get_current_membership, require_buyer_or_admin
 from app.db.session import get_db
 from app.models import (
+    Article,
     CommodityGroup,
     OrderLine,
     Organization,
@@ -18,6 +20,7 @@ from app.models import (
 )
 from app.schemas.requests import (
     ApprovalDecision,
+    OrderLineIn,
     RequestActivityOut,
     RequestCreate,
     RequestOut,
@@ -111,6 +114,60 @@ def _log_activity(
     )
 
 
+def _build_order_lines(
+    lines: list[OrderLineIn], organization_id: uuid.UUID, db: Session
+) -> tuple[list[OrderLine], list[tuple[str, dict]]]:
+    """Order lines from the payload, plus an activity note per catalog line.
+
+    A catalog line (``article_id`` set) gets its unit price and unit from the catalog, never
+    from the browser, so a "negotiated price" can't be faked. The article must belong to the
+    caller's organisation; otherwise 404.
+    """
+    built: list[OrderLine] = []
+    notes: list[tuple[str, dict]] = []
+    for index, line in enumerate(lines, start=1):
+        unit_price, unit, total_price = line.unit_price, line.unit, line.total_price
+        if line.article_id is not None:
+            article = db.scalar(
+                select(Article).where(
+                    Article.id == line.article_id, Article.organization_id == organization_id
+                )
+            )
+            if article is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Catalog article not found"
+                )
+            negotiated = Decimal(str(article.unit_price))
+            unit_price, unit = negotiated, article.unit
+            total_price = (negotiated * Decimal(str(line.amount))).quantize(Decimal("0.01"))
+            quoted = (
+                f" (quoted ${line.quoted_unit_price:,.2f})" if line.quoted_unit_price else ""
+            )
+            notes.append((
+                f"Line {index} uses catalog article {article.article_number} "
+                f"at the negotiated ${negotiated:,.2f} / {unit}{quoted}",
+                {
+                    "line": index,
+                    "article_id": str(article.id),
+                    "negotiated_unit_price": str(negotiated),
+                    "quoted_unit_price": line.quoted_unit_price,
+                },
+            ))
+        built.append(
+            OrderLine(
+                position_description=line.position_description,
+                unit_price=unit_price,
+                amount=line.amount,
+                unit=unit,
+                total_price=total_price,
+                line_order=index,
+                article_id=line.article_id,
+                quoted_unit_price=line.quoted_unit_price if line.article_id else None,
+            )
+        )
+    return built, notes
+
+
 def _order_lines_signature(lines) -> list[tuple]:
     return [
         (
@@ -124,7 +181,9 @@ def _order_lines_signature(lines) -> list[tuple]:
     ]
 
 
-def _changed_fields(request: ProcurementRequest, payload: RequestUpdate) -> list[str]:
+def _changed_fields(
+    request: ProcurementRequest, payload: RequestUpdate, new_lines: list[OrderLine]
+) -> list[str]:
     """Return the field keys whose value differs between the request and payload."""
     changed: list[str] = []
     if request.requestor_name != payload.requestor_name:
@@ -144,8 +203,8 @@ def _changed_fields(request: ProcurementRequest, payload: RequestUpdate) -> list
     old_lines = _order_lines_signature(
         sorted(request.order_lines, key=lambda line: line.line_order)
     )
-    new_lines = _order_lines_signature(payload.order_lines)
-    if old_lines != new_lines:
+    # Compare with the lines as they will be stored (catalog prices already applied).
+    if old_lines != _order_lines_signature(new_lines):
         changed.append("order_lines")
     return changed
 
@@ -199,20 +258,14 @@ def create_request(
         created_by=membership.user_id,
         status="open",
     )
-    request.order_lines = [
-        OrderLine(
-            position_description=line.position_description,
-            unit_price=line.unit_price,
-            amount=line.amount,
-            unit=line.unit,
-            total_price=line.total_price,
-            line_order=index + 1,
-        )
-        for index, line in enumerate(payload.order_lines)
-    ]
+    request.order_lines, catalog_notes = _build_order_lines(
+        payload.order_lines, membership.organization_id, db
+    )
     db.add(request)
     db.flush()
     _log_activity(db, request.id, membership.user_id, "created", "Request created")
+    for summary, detail in catalog_notes:
+        _log_activity(db, request.id, membership.user_id, "catalog_article", summary, detail)
     db.commit()
 
     request = _get_org_request(db, request.id, membership.organization_id)
@@ -230,7 +283,11 @@ def update_request(
     _validate_commodity_group(db, payload.commodity_group_id)
     _enforce_required_fields(db, membership.organization_id, payload)
 
-    changed = _changed_fields(request, payload)
+    new_lines, catalog_notes = _build_order_lines(
+        payload.order_lines, membership.organization_id, db
+    )
+    changed = _changed_fields(request, payload, new_lines)
+    already_linked = {line.article_id for line in request.order_lines if line.article_id}
 
     request.requestor_name = payload.requestor_name
     request.title = payload.title
@@ -241,17 +298,12 @@ def update_request(
     request.department = payload.department
 
     # Replace order lines (same semantics as the original delete-and-insert).
-    request.order_lines = [
-        OrderLine(
-            position_description=line.position_description,
-            unit_price=line.unit_price,
-            amount=line.amount,
-            unit=line.unit,
-            total_price=line.total_price,
-            line_order=index + 1,
-        )
-        for index, line in enumerate(payload.order_lines)
-    ]
+    request.order_lines = new_lines
+
+    # Log only articles newly linked by this edit.
+    for summary, detail in catalog_notes:
+        if uuid.UUID(detail["article_id"]) not in already_linked:
+            _log_activity(db, request.id, membership.user_id, "catalog_article", summary, detail)
 
     if changed:
         labels = [_FIELD_LABELS.get(f, f) for f in changed]

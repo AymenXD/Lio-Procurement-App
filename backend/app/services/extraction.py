@@ -1,15 +1,15 @@
 import logging
 import re
 import time
-from functools import cache
 
-from openai import APITimeoutError, OpenAI, RateLimitError
+from openai import APITimeoutError, RateLimitError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models import CommodityGroup
 from app.schemas.extraction import ExtractedVendorData, ExtractionResponse, QuoteExtraction
+from app.services.ai import get_client
 from app.services.reconciliation import check_numbers
 
 logger = logging.getLogger(__name__)
@@ -19,12 +19,6 @@ ERROR_TIMEOUT = "The AI took too long to read this quote. Please try again."
 ERROR_BUSY = "The AI service is busy. Please try again in a minute."
 ERROR_REFUSED = "The AI could not read this quote. Please fill in the form manually."
 ERROR_FAILED = "Extraction failed. Please try again or fill in the form manually."
-
-
-@cache
-def _client() -> OpenAI:
-    """One shared client: 60 s timeout, one automatic retry on 429/5xx/connection errors."""
-    return OpenAI(api_key=settings.openai_api_key, timeout=60, max_retries=1)
 
 
 def _log_call(started: float, outcome: str, usage: object = None) -> None:
@@ -122,7 +116,7 @@ def extract_vendor_data(pdf_text: str, db: Session) -> ExtractionResponse:
     started = time.perf_counter()
     try:
         # Structured Outputs: OpenAI guarantees the reply matches QuoteExtraction.
-        response = _client().beta.chat.completions.parse(
+        response = get_client().beta.chat.completions.parse(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},

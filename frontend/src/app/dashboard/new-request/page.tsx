@@ -6,6 +6,7 @@ import { useMutation } from '@tanstack/react-query';
 import * as api from '@/lib/api';
 import { useCommodityGroups } from '@/lib/hooks/useCommodityGroups';
 import { Button, Input, Alert, Loader } from '@/components/base';
+import { CatalogSuggestions } from '@/components/CatalogSuggestions';
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024; // same limit as the backend
 const NOT_FOUND = 'Not found or unclear on the quote. Please fill in or check.';
@@ -16,6 +17,8 @@ interface OrderLine {
   amount: number;
   unit: string;
   totalPrice: number;
+  articleId?: string | null; // set when the line uses a catalog article (negotiated price)
+  quotedUnitPrice?: number | null; // the original quote's price it replaced
 }
 
 export default function NewRequestPage() {
@@ -56,6 +59,68 @@ export default function NewRequestPage() {
   const [missing, setMissing] = useState<string[]>([]);
   const flag = (field: string) => (missing.includes(field) ? NOT_FOUND : undefined);
   const unflag = (field: string) => setMissing((m) => m.filter((f) => f !== field));
+
+  // Catalog suggestions: one list per order line, same order as orderLines.
+  const [suggestions, setSuggestions] = useState<api.ArticleSuggestion[][]>([]);
+  const [checkingCatalog, setCheckingCatalog] = useState(false);
+
+  const loadSuggestions = async (
+    lines: { positionDescription: string; unitPrice: number }[],
+    groupId: number | null
+  ) => {
+    if (lines.length === 0) {
+      setSuggestions([]);
+      return;
+    }
+    setCheckingCatalog(true);
+    try {
+      const result = await api.articles.suggest(
+        lines.map((l) => ({ description: l.positionDescription, unit_price: l.unitPrice || null })),
+        groupId
+      );
+      setSuggestions(result.lines);
+    } catch {
+      setSuggestions([]); // suggestions are optional; the form works without them
+    } finally {
+      setCheckingCatalog(false);
+    }
+  };
+
+  // The negotiated price belongs to another supplier, so it goes into a separate request.
+  const startRequestWith = (s: api.ArticleSuggestion, line: OrderLine) => {
+    const q = new URLSearchParams({
+      vendor: s.supplier_name ?? '',
+      description: s.description,
+      unitPrice: s.unit_price,
+      unit: s.unit,
+      amount: String(line.amount || 1),
+      articleId: s.article_id,
+    });
+    if (line.unitPrice > 0) q.set('quotedUnitPrice', String(line.unitPrice));
+    if (commodityGroupId) q.set('commodityGroupId', String(commodityGroupId));
+    window.open(`/dashboard/new-request?${q.toString()}`, '_blank');
+  };
+
+  // Prefill from "Start request with this article" (URL parameters), once on open.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const description = q.get('description');
+    if (!description) return;
+    const unitPrice = Number(q.get('unitPrice')) || 0;
+    const amount = Number(q.get('amount')) || 1;
+    setVendorName(q.get('vendor') ?? '');
+    setTitle(description);
+    const quoted = Number(q.get('quotedUnitPrice'));
+    setOrderLines([
+      { positionDescription: description, unitPrice, amount, unit: q.get('unit') ?? '',
+        totalPrice: unitPrice * amount, articleId: q.get('articleId'),
+        quotedUnitPrice: quoted > 0 ? quoted : null },
+    ]);
+    setTotalCost(unitPrice * amount);
+    const groupId = Number(q.get('commodityGroupId'));
+    if (groupId) setCommodityGroupId(groupId);
+    setSuccess('Prefilled from the catalog with the negotiated price. Review and submit.');
+  }, []);
 
   // PDF parsing mutation
   const parsePDFMutation = useMutation({
@@ -122,6 +187,9 @@ export default function NewRequestPage() {
         setCommodityGroupId(extracted.commodityGroupId);
       }
 
+      // Look up negotiated catalog prices for the extracted lines (in the background).
+      void loadSuggestions(extracted.orderLines || [], extracted.commodityGroupId ?? null);
+
       // Department isn't missing if the profile filled it.
       const missingFields = (extractionResult.missingFields ?? []).filter(
         (f) => !(f === 'Department' && dept)
@@ -155,6 +223,7 @@ export default function NewRequestPage() {
 
   // Add order line manually
   const addOrderLine = () => {
+    setSuggestions([]); // positions change; "Check catalog prices" reloads them
     setOrderLines([
       ...orderLines,
       {
@@ -186,6 +255,7 @@ export default function NewRequestPage() {
 
   // Remove order line
   const removeOrderLine = (index: number) => {
+    setSuggestions([]); // positions change; "Check catalog prices" reloads them
     const updated = orderLines.filter((_, i) => i !== index);
     setOrderLines(updated);
     const newTotal = updated.reduce((sum, line) => sum + line.totalPrice, 0);
@@ -388,7 +458,13 @@ export default function NewRequestPage() {
             </label>
             <select
               value={commodityGroupId || ''}
-              onChange={(e) => { setCommodityGroupId(Number(e.target.value)); unflag('Commodity Group'); }}
+              onChange={(e) => {
+                const groupId = Number(e.target.value) || null;
+                setCommodityGroupId(groupId);
+                unflag('Commodity Group');
+                // Suggestions are filtered by the group's category, so refresh them.
+                if (orderLines.length > 0) void loadSuggestions(orderLines, groupId);
+              }}
               required
               className={`w-full px-3 py-2 border rounded-lg text-gray-900 focus:ring-2 focus:ring-accent-deep/60 focus:border-accent-deep/40 ${flag('Commodity Group') ? 'border-red-500' : 'border-gray-300'}`}
             >
@@ -408,9 +484,21 @@ export default function NewRequestPage() {
         <div className="lio-card p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold tracking-tight text-ink">Order Lines *</h2>
-            <Button type="button" onClick={addOrderLine} variant="outline" size="sm">
-              + Add Line
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                onClick={() => loadSuggestions(orderLines, commodityGroupId)}
+                variant="outline"
+                size="sm"
+                loading={checkingCatalog}
+                disabled={orderLines.length === 0}
+              >
+                Check catalog prices
+              </Button>
+              <Button type="button" onClick={addOrderLine} variant="outline" size="sm">
+                + Add Line
+              </Button>
+            </div>
           </div>
 
           {orderLines.length === 0 ? (
@@ -454,6 +542,8 @@ export default function NewRequestPage() {
                         updateOrderLine(index, 'unitPrice', parseFloat(e.target.value) || 0)
                       }
                       required
+                      readOnly={!!line.articleId} // the server applies the catalog price anyway
+                      helperText={line.articleId ? 'Negotiated catalog price' : undefined}
                     />
 
                     <Input
@@ -473,6 +563,7 @@ export default function NewRequestPage() {
                       onChange={(e) => updateOrderLine(index, 'unit', e.target.value)}
                       required
                       placeholder="pcs, licenses, etc."
+                      readOnly={!!line.articleId}
                     />
                   </div>
 
@@ -482,6 +573,13 @@ export default function NewRequestPage() {
                       ${line.totalPrice.toFixed(2)}
                     </span>
                   </div>
+
+                  <CatalogSuggestions
+                    suggestions={suggestions[index] ?? []}
+                    lineUnit={line.unit}
+                    lineAmount={line.amount}
+                    onStartRequest={(s) => startRequestWith(s, line)}
+                  />
                 </div>
               ))}
             </div>

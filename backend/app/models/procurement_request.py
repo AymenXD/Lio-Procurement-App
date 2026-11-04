@@ -96,6 +96,11 @@ class OrderLine(Base, CreatedAtMixin):
     unit: Mapped[str] = mapped_column(Text, nullable=False)
     total_price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     line_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Since migration 0007: the catalog article this line uses, and the quoted price it replaced.
+    article_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("articles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    quoted_unit_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     request: Mapped["ProcurementRequest"] = relationship(back_populates="order_lines")
 

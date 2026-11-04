@@ -5,9 +5,24 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.deps import get_current_membership
 from app.db.session import get_db
 from app.models import Article, OrganizationMember
-from app.schemas.articles import ArticleOut, ArticlePage
+from app.schemas.articles import ArticleOut, ArticlePage, SuggestionRequest, SuggestionResponse
+from app.services.catalog_matching import suggest
 
 router = APIRouter(prefix="/articles", tags=["articles"])
+
+
+@router.post("/suggestions", response_model=SuggestionResponse)
+def suggest_articles(
+    payload: SuggestionRequest,
+    membership: OrganizationMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+) -> SuggestionResponse:
+    """Catalog articles (negotiated prices) similar in meaning to each order line.
+
+    Only the caller's organisation's articles are considered.
+    """
+    lines = suggest(payload.lines, membership.organization_id, db, payload.commodity_group_id)
+    return SuggestionResponse(lines=lines)
 
 
 @router.get("", response_model=ArticlePage)

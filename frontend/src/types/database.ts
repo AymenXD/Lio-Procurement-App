@@ -75,6 +75,8 @@ export type OrderLine = {
   unit: string;
   total_price: number;
   line_order: number;
+  article_id?: string | null; // catalog article this line uses (negotiated price)
+  quoted_unit_price?: number | string | null; // the original quote's price it replaced
   created_at: string;
 };
 
