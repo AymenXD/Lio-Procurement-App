@@ -32,6 +32,15 @@ class BookingRule(BaseModel):
         return cleaned
 
 
+class AutoApprovalPolicy(BaseModel):
+    """Requests whose total is below ``below_amount`` are approved without a buyer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    below_amount: float = Field(default=2000, gt=0)
+
+
 class OrganizationSettings(BaseModel):
     """Per-organization configuration. Stored as JSONB, validated here.
 
@@ -43,6 +52,7 @@ class OrganizationSettings(BaseModel):
 
     required_fields: list[ConfigurableRequiredField] = Field(default_factory=list)
     booking_rules: list[BookingRule] = Field(default_factory=list, max_length=50)
+    auto_approval: AutoApprovalPolicy = Field(default_factory=AutoApprovalPolicy)
 
 
 class OrganizationCreate(BaseModel):

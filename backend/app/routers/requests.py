@@ -30,7 +30,9 @@ from app.schemas.requests import (
     RequestUpdate,
     StatusUpdate,
 )
+from app.services.approval_policy import auto_approves, needs_reapproval, policy_for
 from app.services.booking_rules import match_rule, rules_for
+from app.services.totals import line_total, request_total
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -44,6 +46,7 @@ _FIELD_LABELS = {
     "vat_id": "tax ID",
     "commodity_group_id": "commodity group",
     "total_cost": "total cost",
+    "tax_amount": "tax",
     "department": "department",
     "order_lines": "order lines",
 }
@@ -102,7 +105,7 @@ def _enforce_required_fields(
 def _log_activity(
     db: Session,
     request_id: uuid.UUID,
-    actor_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
     action: str,
     summary: str,
     detail: dict | None = None,
@@ -114,6 +117,8 @@ def _log_activity(
             action=action,
             summary=summary,
             detail=detail,
+            # Stamped here, not by Postgres now() (transaction start): keeps entries in order.
+            created_at=datetime.now(timezone.utc),
         )
     )
 
@@ -130,7 +135,7 @@ def _build_order_lines(
     built: list[OrderLine] = []
     notes: list[tuple[str, dict]] = []
     for index, line in enumerate(lines, start=1):
-        unit_price, unit, total_price = line.unit_price, line.unit, line.total_price
+        unit_price, unit = line.unit_price, line.unit
         if line.article_id is not None:
             article = db.scalar(
                 select(Article).where(
@@ -143,7 +148,6 @@ def _build_order_lines(
                 )
             negotiated = Decimal(str(article.unit_price))
             unit_price, unit = negotiated, article.unit
-            total_price = (negotiated * Decimal(str(line.amount))).quantize(Decimal("0.01"))
             quoted = (
                 f" (quoted ${line.quoted_unit_price:,.2f})" if line.quoted_unit_price else ""
             )
@@ -157,6 +161,7 @@ def _build_order_lines(
                     "quoted_unit_price": line.quoted_unit_price,
                 },
             ))
+        total_price = line_total(unit_price, line.amount)  # never the browser's total
         built.append(
             OrderLine(
                 position_description=line.position_description,
@@ -194,6 +199,26 @@ def _apply_booking_rule(
     return group.id, (summary, {"rule_id": rule.id, "was_commodity_group_id": chosen_group_id})
 
 
+def _apply_auto_approval(db: Session, request: ProcurementRequest) -> None:
+    """Approve a pending request whose total is under the organisation's limit."""
+    if request.approval_status != "pending":
+        return
+    policy = policy_for(db, request.organization_id)
+    total = Decimal(str(request.total_cost))
+    if not auto_approves(total, policy):
+        return
+    request.approval_status = "approved"
+    request.approval_source = "auto"
+    request.approved_by = None  # no person decided
+    request.approved_at = datetime.now(timezone.utc)
+    limit = Decimal(str(policy.below_amount))
+    _log_activity(
+        db, request.id, None, "auto_approved",
+        f"Auto-approved: ${total:,.2f} is under the ${limit:,.0f} limit",
+        {"total": str(total), "limit": str(limit)},
+    )
+
+
 def _order_lines_signature(lines) -> list[tuple]:
     return [
         (
@@ -208,7 +233,10 @@ def _order_lines_signature(lines) -> list[tuple]:
 
 
 def _changed_fields(
-    request: ProcurementRequest, payload: RequestUpdate, new_lines: list[OrderLine]
+    request: ProcurementRequest,
+    payload: RequestUpdate,
+    new_lines: list[OrderLine],
+    new_total: Decimal,
 ) -> list[str]:
     """Return the field keys whose value differs between the request and payload."""
     changed: list[str] = []
@@ -222,8 +250,10 @@ def _changed_fields(
         changed.append("vat_id")
     if request.commodity_group_id != payload.commodity_group_id:
         changed.append("commodity_group_id")
-    if float(request.total_cost or 0) != float(payload.total_cost or 0):
+    if Decimal(str(request.total_cost or 0)) != new_total:
         changed.append("total_cost")
+    if Decimal(str(request.tax_amount or 0)) != Decimal(str(payload.tax_amount or 0)):
+        changed.append("tax_amount")
     if (request.department or "") != (payload.department or ""):
         changed.append("department")
     old_lines = _order_lines_signature(
@@ -297,7 +327,7 @@ def create_request(
         vendor_name=payload.vendor_name,
         vat_id=payload.vat_id,
         commodity_group_id=payload.commodity_group_id,
-        total_cost=payload.total_cost,
+        tax_amount=payload.tax_amount,
         department=payload.department,
         organization_id=membership.organization_id,
         created_by=membership.user_id,
@@ -309,6 +339,9 @@ def create_request(
     request.commodity_group_id, booking_note = _apply_booking_rule(
         db, membership.organization_id, request.order_lines, payload.commodity_group_id
     )
+    request.total_cost = request_total(
+        (line.total_price for line in request.order_lines), payload.tax_amount
+    )
     db.add(request)
     db.flush()
     _log_activity(db, request.id, membership.user_id, "created", "Request created")
@@ -316,6 +349,7 @@ def create_request(
         _log_activity(db, request.id, membership.user_id, "booking_rule", *booking_note)
     for summary, detail in catalog_notes:
         _log_activity(db, request.id, membership.user_id, "catalog_article", summary, detail)
+    _apply_auto_approval(db, request)
     db.commit()
 
     request = _get_org_request(db, request.id, membership.organization_id)
@@ -341,7 +375,8 @@ def update_request(
     )
     overridden = group_id != payload.commodity_group_id
     payload = payload.model_copy(update={"commodity_group_id": group_id})
-    changed = _changed_fields(request, payload, new_lines)
+    new_total = request_total((line.total_price for line in new_lines), payload.tax_amount)
+    changed = _changed_fields(request, payload, new_lines, new_total)
     already_linked = {line.article_id for line in request.order_lines if line.article_id}
 
     request.requestor_name = payload.requestor_name
@@ -349,7 +384,8 @@ def update_request(
     request.vendor_name = payload.vendor_name
     request.vat_id = payload.vat_id
     request.commodity_group_id = payload.commodity_group_id
-    request.total_cost = payload.total_cost
+    request.total_cost = new_total
+    request.tax_amount = payload.tax_amount
     request.department = payload.department
 
     # Replace order lines (same semantics as the original delete-and-insert).
@@ -374,6 +410,21 @@ def update_request(
             f"Updated {', '.join(labels)}",
             {"changed_fields": changed},
         )
+
+    # A money or vendor change voids an approval; then the policy is checked again.
+    if needs_reapproval(changed):
+        if request.approval_status == "approved":
+            request.approval_status = "pending"
+            request.approval_source = None
+            request.approved_by = None
+            request.approved_at = None
+            material = [_FIELD_LABELS[f] for f in changed if needs_reapproval([f])]
+            _log_activity(
+                db, request.id, membership.user_id, "approval_reset",
+                f"Back to pending: {', '.join(material)} changed after approval",
+                {"changed_fields": changed},
+            )
+        _apply_auto_approval(db, request)
     db.commit()
 
     request = _get_org_request(db, request_id, membership.organization_id)
@@ -422,6 +473,7 @@ def decide_approval(
         )
 
     request.approval_status = payload.decision
+    request.approval_source = "manual"
     request.approved_by = membership.user_id
     request.approved_at = datetime.now(timezone.utc)
     _log_activity(

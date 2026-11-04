@@ -428,9 +428,9 @@ def test_activity_log_and_document():
     payload = {
         "requestorName": "Alex Admin", "titleShortDescription": "Chairs",
         "vendorName": "FurnitureCo", "vatId": "12-0000001", "commodityGroupId": 15,
-        "totalCost": 500.0, "department": "Ops",
+        "totalCost": 2500.0, "department": "Ops",  # above Acme's auto-approval limit
         "orderLines": [
-            {"positionDescription": "Chair", "unitPrice": 250, "amount": 2, "unit": "pc", "totalPrice": 500}
+            {"positionDescription": "Chair", "unitPrice": 250, "amount": 10, "unit": "pc", "totalPrice": 2500}
         ],
     }
     rid = client.post("/requests", json=payload, headers=_auth(admin)).json()["id"]
@@ -438,14 +438,14 @@ def test_activity_log_and_document():
     # edit two fields -> one 'updated' activity naming those fields
     updated = dict(payload)
     updated["title"] = "Office Chairs"
-    updated["totalCost"] = 600.0
+    updated["totalCost"] = 3000.0
     updated["orderLines"] = [
-        {"positionDescription": "Chair", "unitPrice": 300, "amount": 2, "unit": "pc", "totalPrice": 600}
+        {"positionDescription": "Chair", "unitPrice": 300, "amount": 10, "unit": "pc", "totalPrice": 3000}
     ]
     # RequestUpdate uses "title" (not titleShortDescription)
     updated = {
         "requestorName": "Alex Admin", "title": "Office Chairs", "vendorName": "FurnitureCo",
-        "vatId": "12-0000001", "commodityGroupId": 15, "totalCost": 600.0, "department": "Ops",
+        "vatId": "12-0000001", "commodityGroupId": 15, "totalCost": 3000.0, "department": "Ops",
         "orderLines": updated["orderLines"],
     }
     r = client.put(f"/requests/{rid}", json=updated, headers=_auth(admin))
@@ -739,7 +739,10 @@ def test_org_settings_required_fields():
     # Default settings: nothing extra required, no booking rules.
     r = client.get("/organizations/me/settings", headers=_auth(token))
     assert r.status_code == 200
-    assert r.json() == {"required_fields": [], "booking_rules": []}
+    assert r.json() == {
+        "required_fields": [], "booking_rules": [],
+        "auto_approval": {"enabled": False, "below_amount": 2000.0},
+    }
 
     base_payload = {
         "requestorName": "S", "titleShortDescription": "T", "vendorName": "V",
@@ -950,3 +953,88 @@ def test_settings_patch_merges_instead_of_wiping_rules():
     r = client.patch("/organizations/me/settings", json={"booking_rules": [bad_rule]},
                      headers=_auth(admin))
     assert r.status_code == 422
+
+
+# --- Bonus: auto-approval below Acme's $2,000 limit -------------------------------------------
+
+
+def _priced_request(unit_price: float, tax: float | None = None, title: str = "Desk") -> dict:
+    return {
+        "requestorName": "Rene Requester", "titleShortDescription": title, "title": title,
+        "vendorName": "FurnitureCo", "vatId": "12-0000001", "department": "Facilities",
+        "commodityGroupId": 15, "totalCost": 1.0,  # the browser's total is ignored
+        "taxAmount": tax,
+        "orderLines": [{"positionDescription": "Standing desk", "unitPrice": unit_price,
+                        "amount": 1, "unit": "piece", "totalPrice": 1.0}],
+    }
+
+
+def _actions(request_id: str, token: str) -> list[str]:
+    return [a["action"] for a in
+            client.get(f"/requests/{request_id}/activity", headers=_auth(token)).json()]
+
+
+def test_small_request_is_auto_approved_without_an_approver():
+    requester, admin = _signin("requester@acme.com"), _signin("admin@acme.com")
+    r = client.post("/requests", json=_priced_request(1800, tax=199.99), headers=_auth(requester))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["total_cost"] == 1999.99  # lines + tax, not the browser's 1.0
+    assert body["order_lines"][0]["total_price"] == 1800
+    assert (body["approval_status"], body["approval_source"]) == ("approved", "auto")
+    assert body["approved_by"] is None
+    assert "auto_approved" in _actions(body["id"], requester)
+    client.delete(f"/requests/{body['id']}", headers=_auth(admin))
+
+
+def test_exactly_the_limit_needs_a_buyer():
+    requester, admin = _signin("requester@acme.com"), _signin("admin@acme.com")
+    r = client.post("/requests", json=_priced_request(1900, tax=100), headers=_auth(requester))
+    assert r.json()["total_cost"] == 2000
+    assert r.json()["approval_status"] == "pending"
+    client.delete(f"/requests/{r.json()['id']}", headers=_auth(admin))
+
+
+def test_negative_prices_are_refused():
+    requester = _signin("requester@acme.com")
+    r = client.post("/requests", json=_priced_request(-500), headers=_auth(requester))
+    assert r.status_code == 422
+
+
+def test_other_tenants_have_no_auto_approval():
+    walmart = _signin("admin@walmart.com")
+    r = client.post("/requests", json=_priced_request(10), headers=_auth(walmart))
+    assert r.status_code == 201, r.text
+    assert r.json()["approval_status"] == "pending"
+    client.delete(f"/requests/{r.json()['id']}", headers=_auth(walmart))
+
+
+def test_a_money_change_after_approval_needs_approval_again():
+    requester, buyer, admin = (
+        _signin("requester@acme.com"), _signin("buyer@acme.com"), _signin("admin@acme.com"))
+    rid = client.post("/requests", json=_priced_request(3000), headers=_auth(requester)).json()["id"]
+    client.patch(f"/requests/{rid}/approval", json={"decision": "approved"}, headers=_auth(buyer))
+
+    # A title change keeps the buyer's approval.
+    r = client.put(f"/requests/{rid}", json=_priced_request(3000, title="Desk (2nd floor)"),
+                   headers=_auth(requester))
+    assert (r.json()["approval_status"], r.json()["approval_source"]) == ("approved", "manual")
+
+    # Raising the price voids it.
+    r = client.put(f"/requests/{rid}", json=_priced_request(3500), headers=_auth(requester))
+    assert r.json()["approval_status"] == "pending"
+    assert r.json()["approved_by"] is None
+    assert "approval_reset" in _actions(rid, requester)
+    client.delete(f"/requests/{rid}", headers=_auth(admin))
+
+
+def test_auto_approval_is_checked_again_after_an_edit():
+    requester, admin = _signin("requester@acme.com"), _signin("admin@acme.com")
+    rid = client.post("/requests", json=_priced_request(500), headers=_auth(requester)).json()["id"]
+
+    r = client.put(f"/requests/{rid}", json=_priced_request(2500), headers=_auth(requester))
+    assert r.json()["approval_status"] == "pending"  # now over the limit
+
+    r = client.put(f"/requests/{rid}", json=_priced_request(600), headers=_auth(requester))
+    assert (r.json()["approval_status"], r.json()["approval_source"]) == ("approved", "auto")
+    client.delete(f"/requests/{rid}", headers=_auth(admin))

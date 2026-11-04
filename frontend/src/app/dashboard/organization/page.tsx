@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import * as api from '@/lib/api';
 import { Button, Input, Alert } from '@/components/base';
+import { AutoApprovalCard } from '@/components/AutoApprovalCard';
 import { BookingRulesCard } from '@/components/BookingRulesCard';
 import type { OrganizationMemberWithProfile, OrganizationInvite } from '@/types/database';
 
@@ -29,6 +30,10 @@ export default function OrganizationPage() {
   const [requiredFields, setRequiredFields] = useState<api.ConfigurableRequiredField[]>([]);
   const [savingSettings, setSavingSettings] = useState(false);
   const [bookingRules, setBookingRules] = useState<api.BookingRule[]>([]);
+  const [autoApproval, setAutoApproval] = useState<api.AutoApprovalPolicy>({
+    enabled: false,
+    below_amount: 2000,
+  });
 
   useEffect(() => {
     loadOrganization();
@@ -51,6 +56,7 @@ export default function OrganizationPage() {
       setInvites(result.invites);
       setRequiredFields(settings.required_fields);
       setBookingRules(settings.booking_rules ?? []);
+      if (settings.auto_approval) setAutoApproval(settings.auto_approval);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load organization');
     }
@@ -128,6 +134,24 @@ export default function OrganizationPage() {
       return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save booking rules');
+      return false;
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  // Saves only auto_approval: the server merges, so the other settings are kept.
+  const saveAutoApproval = async (next: api.AutoApprovalPolicy) => {
+    setSavingSettings(true);
+    setError('');
+    setSuccess('');
+    try {
+      const saved = await api.organizations.updateSettings({ auto_approval: next });
+      if (saved.auto_approval) setAutoApproval(saved.auto_approval);
+      setSuccess('Auto-approval updated');
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save auto-approval');
       return false;
     } finally {
       setSavingSettings(false);
@@ -315,6 +339,7 @@ export default function OrganizationPage() {
             })}
           </div>
         </div>
+        <AutoApprovalCard policy={autoApproval} busy={savingSettings} onSave={saveAutoApproval} />
         <BookingRulesCard rules={bookingRules} busy={savingSettings} onSave={saveBookingRules} />
         </>
       )}

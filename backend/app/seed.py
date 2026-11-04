@@ -78,6 +78,19 @@ def seed_booking_rules(db: Session, organization: Organization) -> int:
     return len(ACME_BOOKING_RULES)
 
 
+# Acme: "Anything below $2,000 shouldn't need approval at all." Other tenants stay off.
+ACME_AUTO_APPROVAL = {"enabled": True, "below_amount": 2000}
+
+
+def seed_auto_approval(db: Session, organization: Organization) -> int:
+    """Turn Acme's policy on once. Never overwrites a policy an admin has changed."""
+    settings = organization.settings or {}
+    if "auto_approval" in settings:
+        return 0
+    organization.settings = {**settings, "auto_approval": ACME_AUTO_APPROVAL}
+    return 1
+
+
 # Demo profile departments, prefilled on New Request. The other accounts stay empty,
 # so the demo also shows the fallback to the department extracted from the quote.
 DEMO_DEPARTMENTS = {"requester@acme.com": "Facilities"}
@@ -225,6 +238,7 @@ def seed(db: Session) -> dict[str, int]:
         "users": users_created,
         "demo_departments": seed_demo_departments(db),
         "booking_rules": seed_booking_rules(db, dev_org) if dev_org else 0,
+        "auto_approval": seed_auto_approval(db, dev_org) if dev_org else 0,
     }
     db.commit()
     return counts

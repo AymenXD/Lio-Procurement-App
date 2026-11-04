@@ -61,7 +61,9 @@ export type ProcurementRequest = {
   approval_status: 'pending' | 'approved' | 'rejected';
   approved_by: string | null;
   approved_at: string | null;
-  total_cost: number | null;
+  approval_source?: 'auto' | 'manual' | null; // 'auto' = approved by the org's policy, no buyer
+  tax_amount?: number | string | null;
+  total_cost: number | null; // computed by the server: lines + tax
   created_at: string;
   updated_at: string;
 };

@@ -167,13 +167,19 @@ export default function RequestsPage() {
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      <span
-                        className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                          APPROVAL_BADGE[request.approval_status]
-                        }`}
-                      >
-                        {titleCase(request.approval_status)}
-                      </span>
+                      {request.approval_status === 'approved' && request.approval_source === 'auto' ? (
+                        <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-accent-soft/40 text-accent-deep">
+                          Auto-approved
+                        </span>
+                      ) : (
+                        <span
+                          className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                            APPROVAL_BADGE[request.approval_status]
+                          }`}
+                        >
+                          {titleCase(request.approval_status)}
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-ink">
                       ${(request.total_cost || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
