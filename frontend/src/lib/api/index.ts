@@ -60,6 +60,8 @@ export interface OrderLineInput {
   amount: number;
   unit: string;
   totalPrice: number;
+  articleId?: string | null; // catalog article: the server applies its negotiated price
+  quotedUnitPrice?: number | null; // the original quote's price, to measure savings
 }
 
 export interface CreateRequestInput {
@@ -316,7 +318,29 @@ export const articles = {
   count(): Promise<{ count: number }> {
     return apiFetch('/articles/count');
   },
+
+  /** Similar catalog articles (negotiated prices) per order line, same order as `lines`. */
+  suggest(
+    lines: { description: string; unit_price: number | null }[],
+    commodityGroupId: number | null
+  ): Promise<{ lines: ArticleSuggestion[][] }> {
+    return apiFetch('/articles/suggestions', {
+      body: { lines, commodity_group_id: commodityGroupId },
+    });
+  },
 };
+
+export interface ArticleSuggestion {
+  article_id: string;
+  article_number: string;
+  description: string;
+  supplier_name: string | null;
+  unit_price: string; // decimal as string
+  currency: string;
+  unit: string;
+  similarity: number;
+  price_difference: string | null; // quoted minus negotiated; positive = catalog cheaper
+}
 
 // ============================================================================
 // PDF + extraction

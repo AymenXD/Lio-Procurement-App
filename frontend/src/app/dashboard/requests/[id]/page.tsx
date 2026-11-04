@@ -150,6 +150,9 @@ export default function RequestDetailPage() {
           amount: l.amount,
           unit: l.unit,
           totalPrice: l.total_price,
+          // Keep the catalog link, or editing would silently drop it.
+          articleId: l.article_id ?? null,
+          quotedUnitPrice: l.quoted_unit_price != null ? Number(l.quoted_unit_price) : null,
         })),
       });
       setEditing(false);

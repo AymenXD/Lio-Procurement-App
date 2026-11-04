@@ -18,6 +18,9 @@ class OrderLineIn(BaseModel):
     amount: float
     unit: str
     total_price: float = Field(alias="totalPrice")
+    # A catalog line: the server takes its price and unit from the catalog, not from here.
+    article_id: uuid.UUID | None = Field(default=None, alias="articleId")
+    quoted_unit_price: float | None = Field(default=None, alias="quotedUnitPrice")
 
 
 class RequestCreate(BaseModel):
@@ -73,6 +76,8 @@ class OrderLineOut(BaseModel):
     unit: str
     total_price: float
     line_order: int
+    article_id: uuid.UUID | None = None
+    quoted_unit_price: float | None = None
     created_at: datetime
 
 

@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import Article, CommodityGroup, RequestActivity, Supplier
+from app.models import Article, CommodityGroup, Organization, RequestActivity, Supplier
 from app.seed import seed
 
 # ---------------------------------------------------------------------------
@@ -833,3 +833,63 @@ if __name__ == "__main__":
     test_org_settings_required_fields()
     test_org_settings_admin_only()
     print("ALL SMOKE TESTS PASSED")
+
+
+def _catalog_request(article_id: str, description: str) -> dict:
+    return {
+        "requestorName": "Rene Requester",
+        "titleShortDescription": "Catalog order",
+        "vendorName": "Catalog supplier",
+        "department": "Facilities",
+        "commodityGroupId": 15,
+        "totalCost": 0.02,
+        "orderLines": [{
+            "positionDescription": description,
+            "unitPrice": 0.01,  # faked by the browser: the server must ignore it
+            "amount": 2,
+            "unit": "whatever",
+            "totalPrice": 0.02,
+            "articleId": article_id,
+            "quotedUnitPrice": 999.0,
+        }],
+    }
+
+
+def test_catalog_line_uses_the_negotiated_price_not_the_browsers():
+    token = _signin("requester@acme.com")
+    article = client.get("/articles?limit=1", headers=_auth(token)).json()["items"][0]
+
+    r = client.post(
+        "/requests", json=_catalog_request(article["id"], article["description"]),
+        headers=_auth(token),
+    )
+
+    assert r.status_code == 201, r.text
+    line = r.json()["order_lines"][0]
+    assert line["unit_price"] == float(article["unit_price"])  # from the catalog
+    assert line["unit"] == article["unit"]
+    assert line["total_price"] == round(2 * float(article["unit_price"]), 2)
+    assert line["article_id"] == article["id"]
+    assert line["quoted_unit_price"] == 999.0
+    activity = client.get(f"/requests/{r.json()['id']}/activity", headers=_auth(token)).json()
+    assert any(a["action"] == "catalog_article" for a in activity)
+
+
+def test_catalog_line_from_another_tenant_is_rejected():
+    with TestingSession() as db:
+        walmart = db.scalar(select(Organization).where(Organization.slug == "walmart"))
+        supplier = Supplier(organization_id=walmart.id, name="Walmart-only supplier")
+        db.add(supplier)
+        db.flush()
+        foreign = Article(
+            organization_id=walmart.id, supplier_id=supplier.id, article_number="WM-1",
+            description="Laptop", unit_price=1, currency="USD", unit="piece", quantity=1,
+        )
+        db.add(foreign)
+        db.commit()
+        foreign_id = str(foreign.id)
+    token = _signin("requester@acme.com")
+
+    r = client.post("/requests", json=_catalog_request(foreign_id, "Laptop"), headers=_auth(token))
+
+    assert r.status_code == 404

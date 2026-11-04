@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.models import CommodityGroup
 from app.schemas.extraction import ExtractedVendorData, QuoteExtraction
-from app.services import extraction
+from app.services import ai, extraction
 
 _ALL_NULL = {field.alias or name: None for name, field in QuoteExtraction.model_fields.items()}
 
@@ -47,8 +47,8 @@ def _db_with_one_group() -> Session:
 def _extract(monkeypatch, reply: dict | Exception | None, text: str = "Quote text"):
     sent: list = []
     monkeypatch.setattr(extraction.settings, "openai_api_key", "test-key")
-    monkeypatch.setattr(extraction, "OpenAI", _fake_openai(reply, sent))
-    extraction._client.cache_clear()  # the real client is cached; build one from the fake
+    monkeypatch.setattr(ai, "OpenAI", _fake_openai(reply, sent))
+    ai.get_client.cache_clear()  # the real client is cached; build one from the fake
     return extraction.extract_vendor_data(text, _db_with_one_group()), sent
 
 
