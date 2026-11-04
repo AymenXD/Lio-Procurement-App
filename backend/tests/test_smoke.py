@@ -736,10 +736,10 @@ def test_org_settings_required_fields():
         headers=_auth(token),
     )
 
-    # Default settings: nothing extra required.
+    # Default settings: nothing extra required, no booking rules.
     r = client.get("/organizations/me/settings", headers=_auth(token))
     assert r.status_code == 200
-    assert r.json() == {"required_fields": []}
+    assert r.json() == {"required_fields": [], "booking_rules": []}
 
     base_payload = {
         "requestorName": "S", "titleShortDescription": "T", "vendorName": "V",
@@ -893,3 +893,60 @@ def test_catalog_line_from_another_tenant_is_rejected():
     r = client.post("/requests", json=_catalog_request(foreign_id, "Laptop"), headers=_auth(token))
 
     assert r.status_code == 404
+
+
+def _request_with_line(description: str, total: float, commodity_group_id: int) -> dict:
+    return {
+        "requestorName": "Rene Requester", "titleShortDescription": description,
+        "vendorName": "Some vendor", "department": "Facilities",
+        "commodityGroupId": commodity_group_id, "totalCost": total,
+        "orderLines": [{"positionDescription": description, "unitPrice": total, "amount": 1,
+                        "unit": "piece", "totalPrice": total}],
+    }
+
+
+def test_booking_rule_overrides_the_users_choice_on_create_and_update():
+    token = _signin("requester@acme.com")
+    # The user picks "Toner Cartridges" (204); Acme's rule books toner to IT Hardware (29).
+    r = client.post("/requests", json=_request_with_line("HP 305 black toner", 80, 204),
+                    headers=_auth(token))
+    assert r.status_code == 201, r.text
+    request_id = r.json()["id"]
+    assert r.json()["commodity_group_id"] == 29
+
+    r = client.put(f"/requests/{request_id}", json={
+        **_request_with_line("HP 305 black toner", 80, 204), "title": "Toner",
+    }, headers=_auth(token))
+    assert r.status_code == 200, r.text
+    assert r.json()["commodity_group_id"] == 29
+
+    activity = client.get(f"/requests/{request_id}/activity", headers=_auth(token)).json()
+    assert any(a["action"] == "booking_rule" and "Printer toner" in a["summary"] for a in activity)
+
+
+def test_booking_rule_preview_and_other_tenants_unaffected():
+    acme = _signin("requester@acme.com")
+    body = {"lines": [{"description": "Cable ties 200mm", "total_price": 40}]}
+    r = client.post("/requests/booking-rule-preview", json=body, headers=_auth(acme))
+    assert r.json()["rule"]["commodity_group_id"] == 11
+
+    walmart = _signin("admin@walmart.com")
+    r = client.post("/requests/booking-rule-preview", json=body, headers=_auth(walmart))
+    assert r.json()["rule"] is None
+
+
+def test_settings_patch_merges_instead_of_wiping_rules():
+    admin = _signin("admin@acme.com")
+    before = client.get("/organizations/me/settings", headers=_auth(admin)).json()
+    assert len(before["booking_rules"]) == 3
+
+    r = client.patch("/organizations/me/settings", json={"required_fields": ["vat_id"]},
+                     headers=_auth(admin))
+    assert r.status_code == 200, r.text
+    assert len(r.json()["booking_rules"]) == 3  # still there
+    client.patch("/organizations/me/settings", json={"required_fields": []}, headers=_auth(admin))
+
+    bad_rule = {"id": "x", "label": "X", "keywords": ["x"], "commodity_group_id": 999999}
+    r = client.patch("/organizations/me/settings", json={"booking_rules": [bad_rule]},
+                     headers=_auth(admin))
+    assert r.status_code == 422

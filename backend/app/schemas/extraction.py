@@ -84,3 +84,5 @@ class ExtractionResponse(BaseModel):
     missing_fields: list[str] | None = Field(default=None, alias="missingFields")
     # Numbers that don't add up (see services/reconciliation.py); shown to the user.
     warnings: list[str] | None = None
+    # Label of the org booking rule that set the commodity group, if any.
+    applied_rule: str | None = Field(default=None, alias="appliedRule")

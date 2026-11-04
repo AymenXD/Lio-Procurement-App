@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import * as api from '@/lib/api';
 import { Button, Input, Alert } from '@/components/base';
+import { BookingRulesCard } from '@/components/BookingRulesCard';
 import type { OrganizationMemberWithProfile, OrganizationInvite } from '@/types/database';
 
 type Tab = 'members' | 'settings';
@@ -27,6 +28,7 @@ export default function OrganizationPage() {
   const [role, setRole] = useState<api.MemberRole | null>(null);
   const [requiredFields, setRequiredFields] = useState<api.ConfigurableRequiredField[]>([]);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [bookingRules, setBookingRules] = useState<api.BookingRule[]>([]);
 
   useEffect(() => {
     loadOrganization();
@@ -48,6 +50,7 @@ export default function OrganizationPage() {
       setMembers(result.members);
       setInvites(result.invites);
       setRequiredFields(settings.required_fields);
+      setBookingRules(settings.booking_rules ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load organization');
     }
@@ -111,6 +114,24 @@ export default function OrganizationPage() {
       await loadOrganization(); // revert to server state
     }
     setSavingSettings(false);
+  };
+
+  // Saves only booking_rules: the server merges, so required fields are kept.
+  const saveBookingRules = async (next: api.BookingRule[], message: string) => {
+    setSavingSettings(true);
+    setError('');
+    setSuccess('');
+    try {
+      const saved = await api.organizations.updateSettings({ booking_rules: next });
+      setBookingRules(saved.booking_rules ?? []);
+      setSuccess(message);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save booking rules');
+      return false;
+    } finally {
+      setSavingSettings(false);
+    }
   };
 
   if (loading) {
@@ -267,6 +288,7 @@ export default function OrganizationPage() {
       )}
 
       {tab === 'settings' && (
+        <>
         <div className="lio-card p-6">
           <h2 className="text-xl font-semibold tracking-tight text-ink">Request Settings</h2>
           <p className="text-sm text-ink/55 mt-1 mb-4">
@@ -293,6 +315,8 @@ export default function OrganizationPage() {
             })}
           </div>
         </div>
+        <BookingRulesCard rules={bookingRules} busy={savingSettings} onSave={saveBookingRules} />
+        </>
       )}
     </div>
   );

@@ -119,3 +119,26 @@ class RequestOut(BaseModel):
     commodity_groups: CommodityGroupOut | None = Field(
         default=None, validation_alias="commodity_group"
     )
+
+
+# --- Booking rule preview (POST /requests/booking-rule-preview) -----------------------------
+
+
+class BookingPreviewLine(BaseModel):
+    description: str
+    total_price: float = 0
+
+
+class BookingPreviewRequest(BaseModel):
+    lines: list[BookingPreviewLine] = Field(max_length=200)
+
+
+class AppliedBookingRule(BaseModel):
+    id: str
+    label: str
+    commodity_group_id: int
+    commodity_group_name: str
+
+
+class BookingPreviewResponse(BaseModel):
+    rule: AppliedBookingRule | None

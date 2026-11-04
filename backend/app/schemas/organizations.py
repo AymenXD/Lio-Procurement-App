@@ -2,13 +2,34 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 MemberRole = Literal["admin", "buyer", "requester"]
 
 # Request fields an organization may optionally mark as required. (The other
 # request fields are always required by the app.)
 ConfigurableRequiredField = Literal["vat_id", "department"]
+
+
+class BookingRule(BaseModel):
+    """A tenant's booking rule: lines mentioning a keyword are always booked to one group."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=100)
+    keywords: list[str] = Field(min_length=1, max_length=20)
+    commodity_group_id: int
+    # Applies only if the request total is below this (e.g. "small" subscriptions).
+    max_total: float | None = Field(default=None, gt=0)
+
+    @field_validator("keywords")
+    @classmethod
+    def _clean_keywords(cls, keywords: list[str]) -> list[str]:
+        cleaned = [k.strip().lower() for k in keywords if k.strip()]
+        if not cleaned:
+            raise ValueError("at least one keyword is required")
+        return cleaned
 
 
 class OrganizationSettings(BaseModel):
@@ -21,6 +42,7 @@ class OrganizationSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     required_fields: list[ConfigurableRequiredField] = Field(default_factory=list)
+    booking_rules: list[BookingRule] = Field(default_factory=list, max_length=50)
 
 
 class OrganizationCreate(BaseModel):

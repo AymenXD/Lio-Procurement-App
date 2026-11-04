@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMutation } from '@tanstack/react-query';
 import * as api from '@/lib/api';
-import { useCommodityGroups } from '@/lib/hooks/useCommodityGroups';
 import { Button, Input, Alert, Loader } from '@/components/base';
 import { CatalogSuggestions } from '@/components/CatalogSuggestions';
+import { CommodityGroupPicker } from '@/components/CommodityGroupPicker';
 
 const MAX_PDF_BYTES = 10 * 1024 * 1024; // same limit as the backend
 const NOT_FOUND = 'Not found or unclear on the quote. Please fill in or check.';
@@ -23,7 +23,6 @@ interface OrderLine {
 
 export default function NewRequestPage() {
   const router = useRouter();
-  const { data: commodityGroups } = useCommodityGroups();
 
   // Form state
   const [requestorName, setRequestorName] = useState('');
@@ -121,6 +120,39 @@ export default function NewRequestPage() {
     if (groupId) setCommodityGroupId(groupId);
     setSuccess('Prefilled from the catalog with the negotiated price. Review and submit.');
   }, []);
+
+  // Booking rules: ask the server which rule (if any) applies to the current lines.
+  // A matching rule fixes and locks the commodity group (the server enforces it on save too).
+  const [appliedRule, setAppliedRule] = useState<api.AppliedBookingRule | null>(null);
+  const groupRef = useRef(commodityGroupId);
+  groupRef.current = commodityGroupId;
+  const linesKey = orderLines.map((l) => `${l.positionDescription}|${l.totalPrice}`).join('\n');
+
+  useEffect(() => {
+    if (orderLines.length === 0) {
+      setAppliedRule(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const { rule } = await api.requests.bookingRulePreview(
+          orderLines.map((l) => ({ description: l.positionDescription, total_price: l.totalPrice }))
+        );
+        setAppliedRule(rule);
+        if (rule) {
+          unflag('Commodity Group');
+          if (groupRef.current !== rule.commodity_group_id) {
+            setCommodityGroupId(rule.commodity_group_id);
+            void loadSuggestions(orderLines, rule.commodity_group_id); // filter uses the group
+          }
+        }
+      } catch {
+        // Preview is optional: the server applies the rule on save anyway.
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linesKey]);
 
   // PDF parsing mutation
   const parsePDFMutation = useMutation({
@@ -456,27 +488,23 @@ export default function NewRequestPage() {
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Commodity Group *
             </label>
-            <select
-              value={commodityGroupId || ''}
-              onChange={(e) => {
-                const groupId = Number(e.target.value) || null;
+            <CommodityGroupPicker
+              value={commodityGroupId}
+              onChange={(groupId) => {
                 setCommodityGroupId(groupId);
                 unflag('Commodity Group');
                 // Suggestions are filtered by the group's category, so refresh them.
                 if (orderLines.length > 0) void loadSuggestions(orderLines, groupId);
               }}
+              disabled={appliedRule !== null} // a booking rule decides the group
+              error={!!flag('Commodity Group')}
               required
-              className={`w-full px-3 py-2 border rounded-lg text-gray-900 focus:ring-2 focus:ring-accent-deep/60 focus:border-accent-deep/40 ${flag('Commodity Group') ? 'border-red-500' : 'border-gray-300'}`}
-            >
-              <option value="">
-                {commodityGroups ? 'Select a commodity group' : 'Loading...'}
-              </option>
-              {commodityGroups?.map((group) => (
-                <option key={group.id} value={group.id}>
-                  {group.id} - {group.category} - {group.name}
-                </option>
-              ))}
-            </select>
+            />
+            {appliedRule && (
+              <p className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-accent-soft/30 px-3 py-1 text-xs font-medium text-accent-deep">
+                🔒 Booked to {appliedRule.commodity_group_name} by the rule &ldquo;{appliedRule.label}&rdquo;
+              </p>
+            )}
           </div>
         </div>
 
