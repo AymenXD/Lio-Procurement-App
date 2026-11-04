@@ -45,8 +45,32 @@ export interface MyOrganization {
 // Request fields an org may optionally mark as required (see backend settings).
 export type ConfigurableRequiredField = 'vat_id' | 'department';
 
+// A tenant's categorisation rule: matching lines are always booked to its commodity group.
+export interface BookingRule {
+  id: string;
+  label: string;
+  keywords: string[];
+  commodity_group_id: number;
+  max_total: number | null; // rule applies only if the request total is below this
+}
+
+// Requests whose total is below `below_amount` are approved without a buyer.
+export interface AutoApprovalPolicy {
+  enabled: boolean;
+  below_amount: number;
+}
+
 export interface OrganizationSettings {
   required_fields: ConfigurableRequiredField[];
+  booking_rules: BookingRule[];
+  auto_approval?: AutoApprovalPolicy;
+}
+
+export interface AppliedBookingRule {
+  id: string;
+  label: string;
+  commodity_group_id: number;
+  commodity_group_name: string;
 }
 
 export interface MembersResponse {
@@ -60,6 +84,8 @@ export interface OrderLineInput {
   amount: number;
   unit: string;
   totalPrice: number;
+  articleId?: string | null; // catalog article: the server applies its negotiated price
+  quotedUnitPrice?: number | null; // the original quote's price, to measure savings
 }
 
 export interface CreateRequestInput {
@@ -68,7 +94,8 @@ export interface CreateRequestInput {
   vendorName: string;
   vatId: string;
   commodityGroupId: number;
-  totalCost: number;
+  totalCost?: number; // ignored by the server, which computes lines + tax
+  taxAmount: number | null;
   department: string;
   orderLines: OrderLineInput[];
 }
@@ -79,7 +106,8 @@ export interface UpdateRequestInput {
   vendorName: string;
   vatId: string;
   commodityGroupId: number;
-  totalCost: number;
+  totalCost?: number; // ignored by the server, which computes lines + tax
+  taxAmount: number | null;
   department: string;
   orderLines: OrderLineInput[];
 }
@@ -90,6 +118,7 @@ export interface ExtractedVendorData {
   vatId: string;
   department: string;
   orderLines: OrderLineInput[];
+  taxAmount?: number;
   totalCost: number;
   commodityGroupId: number | null;
   commodityGroupName: string | null;
@@ -100,6 +129,7 @@ export interface ExtractionResponse {
   data?: ExtractedVendorData;
   error?: string;
   missingFields?: string[];
+  warnings?: string[]; // numbers that don't add up
 }
 
 export interface Supplier {
@@ -181,6 +211,13 @@ export const requests = {
     return apiFetch('/requests');
   },
 
+  /** Which booking rule (if any) the server will apply to these lines. */
+  bookingRulePreview(
+    lines: { description: string; total_price: number }[]
+  ): Promise<{ rule: AppliedBookingRule | null }> {
+    return apiFetch('/requests/booking-rule-preview', { body: { lines } });
+  },
+
   get(requestId: string): Promise<ProcurementRequestWithDetails> {
     return apiFetch(`/requests/${requestId}`);
   },
@@ -260,7 +297,8 @@ export const organizations = {
     return apiFetch('/organizations/me/settings');
   },
 
-  updateSettings(settings: OrganizationSettings): Promise<OrganizationSettings> {
+  /** The server merges: send only the fields you change. */
+  updateSettings(settings: Partial<OrganizationSettings>): Promise<OrganizationSettings> {
     return apiFetch('/organizations/me/settings', { method: 'PATCH', body: settings });
   },
 };
@@ -315,7 +353,29 @@ export const articles = {
   count(): Promise<{ count: number }> {
     return apiFetch('/articles/count');
   },
+
+  /** Similar catalog articles (negotiated prices) per order line, same order as `lines`. */
+  suggest(
+    lines: { description: string; unit_price: number | null }[],
+    commodityGroupId: number | null
+  ): Promise<{ lines: ArticleSuggestion[][] }> {
+    return apiFetch('/articles/suggestions', {
+      body: { lines, commodity_group_id: commodityGroupId },
+    });
+  },
 };
+
+export interface ArticleSuggestion {
+  article_id: string;
+  article_number: string;
+  description: string;
+  supplier_name: string | null;
+  unit_price: string; // decimal as string
+  currency: string;
+  unit: string;
+  similarity: number;
+  price_difference: string | null; // quoted minus negotiated; positive = catalog cheaper
+}
 
 // ============================================================================
 // PDF + extraction

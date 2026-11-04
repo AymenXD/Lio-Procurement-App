@@ -6,6 +6,7 @@ export type Profile = {
   id: string;
   email: string;
   full_name: string | null;
+  department?: string | null; // sent by the backend (ProfileOut); used to prefill requests
   avatar_url: string | null;
   created_at: string;
   updated_at: string;
@@ -60,7 +61,9 @@ export type ProcurementRequest = {
   approval_status: 'pending' | 'approved' | 'rejected';
   approved_by: string | null;
   approved_at: string | null;
-  total_cost: number | null;
+  approval_source?: 'auto' | 'manual' | null; // 'auto' = approved by the org's policy, no buyer
+  tax_amount?: number | string | null;
+  total_cost: number | null; // computed by the server: lines + tax
   created_at: string;
   updated_at: string;
 };
@@ -74,6 +77,8 @@ export type OrderLine = {
   unit: string;
   total_price: number;
   line_order: number;
+  article_id?: string | null; // catalog article this line uses (negotiated price)
+  quoted_unit_price?: number | string | null; // the original quote's price it replaced
   created_at: string;
 };
 

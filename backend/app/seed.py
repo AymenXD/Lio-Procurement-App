@@ -52,12 +52,75 @@ ORG_ACCOUNTS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
 ]
 
 
+# Groups a customer needs that the generated taxonomy lacks (it can't be edited by hand).
+# Acme books small software subscriptions to "Office Supplies".
+EXTRA_COMMODITY_GROUPS = [(2001, "Office & Administration", "Office Supplies")]
+
+# Acme's booking rules (editable by Acme admins in Organization → Settings). "Small" software
+# subscriptions = below $2,000, the same limit Acme uses for "doesn't need approval".
+ACME_BOOKING_RULES = [
+    {"id": "cable-ties", "label": "Cable ties", "keywords": ["cable tie", "zip tie"],
+     "commodity_group_id": 11, "max_total": None},
+    {"id": "printer-toner", "label": "Printer toner", "keywords": ["toner"],
+     "commodity_group_id": 29, "max_total": None},
+    {"id": "small-software", "label": "Small software subscriptions",
+     "keywords": ["subscription", "saas", "software license"],
+     "commodity_group_id": 2001, "max_total": 2000},
+]
+
+
+def seed_booking_rules(db: Session, organization: Organization) -> int:
+    """Give Acme its rules once. Never overwrites rules an admin has edited."""
+    settings = organization.settings or {}
+    if "booking_rules" in settings:
+        return 0
+    organization.settings = {**settings, "booking_rules": ACME_BOOKING_RULES}
+    return len(ACME_BOOKING_RULES)
+
+
+# Acme: "Anything below $2,000 shouldn't need approval at all." Other tenants stay off.
+ACME_AUTO_APPROVAL = {"enabled": True, "below_amount": 2000}
+
+
+def seed_auto_approval(db: Session, organization: Organization) -> int:
+    """Turn Acme's policy on once. Never overwrites a policy an admin has changed."""
+    settings = organization.settings or {}
+    if "auto_approval" in settings:
+        return 0
+    organization.settings = {**settings, "auto_approval": ACME_AUTO_APPROVAL}
+    return 1
+
+
+# Demo profile departments, prefilled on New Request. Users created later (sign-up,
+# invites) start empty and fall back to the department extracted from the quote.
+DEMO_DEPARTMENTS = {
+    "admin@acme.com": "Administration",
+    "buyer@acme.com": "Procurement",
+    "requester@acme.com": "Facilities",
+    "admin@walmart.com": "Administration",
+    "admin@schaeffler.com": "Administration",
+    "admin@siemens.com": "Administration",
+    "admin@bmw.com": "Administration",
+}
+
+
+def seed_demo_departments(db: Session) -> int:
+    """Set demo departments on profiles that have none (also fills existing databases)."""
+    updated = 0
+    for email, department in DEMO_DEPARTMENTS.items():
+        profile = db.scalar(select(Profile).where(Profile.email == email))
+        if profile is not None and not profile.department:
+            profile.department = department
+            updated += 1
+    return updated
+
+
 def seed_commodity_groups(db: Session) -> int:
     """Insert commodity groups that aren't already present (keyed by id)."""
     existing = set(db.scalars(select(CommodityGroup.id)))
     new = [
         CommodityGroup(id=cg_id, category=category, name=name)
-        for cg_id, category, name in COMMODITY_GROUPS
+        for cg_id, category, name in [*COMMODITY_GROUPS, *EXTRA_COMMODITY_GROUPS]
         if cg_id not in existing
     ]
     db.add_all(new)
@@ -181,6 +244,9 @@ def seed(db: Session) -> dict[str, int]:
         "articles": seed_articles(db, dev_org_id) if dev_org_id else 0,
         "organizations": orgs_created,
         "users": users_created,
+        "demo_departments": seed_demo_departments(db),
+        "booking_rules": seed_booking_rules(db, dev_org) if dev_org else 0,
+        "auto_approval": seed_auto_approval(db, dev_org) if dev_org else 0,
     }
     db.commit()
     return counts

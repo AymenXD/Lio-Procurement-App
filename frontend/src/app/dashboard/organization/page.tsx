@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import * as api from '@/lib/api';
 import { Button, Input, Alert } from '@/components/base';
+import { AutoApprovalCard } from '@/components/AutoApprovalCard';
+import { BookingRulesCard } from '@/components/BookingRulesCard';
 import type { OrganizationMemberWithProfile, OrganizationInvite } from '@/types/database';
 
 type Tab = 'members' | 'settings';
@@ -27,6 +29,11 @@ export default function OrganizationPage() {
   const [role, setRole] = useState<api.MemberRole | null>(null);
   const [requiredFields, setRequiredFields] = useState<api.ConfigurableRequiredField[]>([]);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [bookingRules, setBookingRules] = useState<api.BookingRule[]>([]);
+  const [autoApproval, setAutoApproval] = useState<api.AutoApprovalPolicy>({
+    enabled: false,
+    below_amount: 2000,
+  });
 
   useEffect(() => {
     loadOrganization();
@@ -48,6 +55,8 @@ export default function OrganizationPage() {
       setMembers(result.members);
       setInvites(result.invites);
       setRequiredFields(settings.required_fields);
+      setBookingRules(settings.booking_rules ?? []);
+      if (settings.auto_approval) setAutoApproval(settings.auto_approval);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load organization');
     }
@@ -111,6 +120,42 @@ export default function OrganizationPage() {
       await loadOrganization(); // revert to server state
     }
     setSavingSettings(false);
+  };
+
+  // Saves only booking_rules: the server merges, so required fields are kept.
+  const saveBookingRules = async (next: api.BookingRule[], message: string) => {
+    setSavingSettings(true);
+    setError('');
+    setSuccess('');
+    try {
+      const saved = await api.organizations.updateSettings({ booking_rules: next });
+      setBookingRules(saved.booking_rules ?? []);
+      setSuccess(message);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save booking rules');
+      return false;
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  // Saves only auto_approval: the server merges, so the other settings are kept.
+  const saveAutoApproval = async (next: api.AutoApprovalPolicy) => {
+    setSavingSettings(true);
+    setError('');
+    setSuccess('');
+    try {
+      const saved = await api.organizations.updateSettings({ auto_approval: next });
+      if (saved.auto_approval) setAutoApproval(saved.auto_approval);
+      setSuccess('Auto-approval updated');
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save auto-approval');
+      return false;
+    } finally {
+      setSavingSettings(false);
+    }
   };
 
   if (loading) {
@@ -267,6 +312,7 @@ export default function OrganizationPage() {
       )}
 
       {tab === 'settings' && (
+        <>
         <div className="lio-card p-6">
           <h2 className="text-xl font-semibold tracking-tight text-ink">Request Settings</h2>
           <p className="text-sm text-ink/55 mt-1 mb-4">
@@ -293,6 +339,9 @@ export default function OrganizationPage() {
             })}
           </div>
         </div>
+        <AutoApprovalCard policy={autoApproval} busy={savingSettings} onSave={saveAutoApproval} />
+        <BookingRulesCard rules={bookingRules} busy={savingSettings} onSave={saveBookingRules} />
+        </>
       )}
     </div>
   );

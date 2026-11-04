@@ -153,12 +153,14 @@ export default function ApprovalsPage() {
                 </div>
                 <span
                   className={`inline-flex px-2.5 py-1 text-xs font-semibold rounded-full ${
-                    request.approval_status === 'approved'
-                      ? 'bg-green-100 text-green-800'
-                      : 'bg-red-100 text-red-700'
+                    request.approval_source === 'auto'
+                      ? 'bg-accent-soft/40 text-accent-deep'
+                      : request.approval_status === 'approved'
+                        ? 'bg-green-100 text-green-800'
+                        : 'bg-red-100 text-red-700'
                   }`}
                 >
-                  {request.approval_status}
+                  {request.approval_source === 'auto' ? 'auto-approved' : request.approval_status}
                 </span>
               </div>
             ))}

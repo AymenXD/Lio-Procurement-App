@@ -29,6 +29,10 @@ class ProcurementRequest(Base, TimestampMixin):
             "approval_status IN ('pending', 'approved', 'rejected')",
             name="ck_procurement_request_approval_status",
         ),
+        CheckConstraint(
+            "approval_source IS NULL OR approval_source IN ('auto', 'manual')",
+            name="ck_procurement_request_approval_source",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -59,9 +63,12 @@ class ProcurementRequest(Base, TimestampMixin):
     approved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Who decided: "auto" (the organisation's policy, no approver) or "manual" (a buyer).
+    approval_source: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    # Financial
+    # Financial: total_cost = sum of the order lines + tax_amount, computed by the server.
     total_cost: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    tax_amount: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     # Multi-tenancy (added in migration 003, nullable for backward compatibility)
     organization_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -96,6 +103,11 @@ class OrderLine(Base, CreatedAtMixin):
     unit: Mapped[str] = mapped_column(Text, nullable=False)
     total_price: Mapped[float] = mapped_column(Numeric(12, 2), nullable=False)
     line_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Since migration 0007: the catalog article this line uses, and the quoted price it replaced.
+    article_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("articles.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    quoted_unit_price: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
 
     request: Mapped["ProcurementRequest"] = relationship(back_populates="order_lines")
 

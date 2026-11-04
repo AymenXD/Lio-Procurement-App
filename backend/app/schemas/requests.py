@@ -14,10 +14,15 @@ ApprovalStatus = Literal["pending", "approved", "rejected"]
 
 class OrderLineIn(BaseModel):
     position_description: str = Field(alias="positionDescription")
-    unit_price: float = Field(alias="unitPrice")
-    amount: float
+    # Not negative: a fake "discount" line could otherwise push a request under the limit.
+    unit_price: float = Field(alias="unitPrice", ge=0)
+    amount: float = Field(ge=0)
     unit: str
-    total_price: float = Field(alias="totalPrice")
+    # Ignored: the server computes amount × unit price.
+    total_price: float | None = Field(default=None, alias="totalPrice")
+    # A catalog line: the server takes its price and unit from the catalog, not from here.
+    article_id: uuid.UUID | None = Field(default=None, alias="articleId")
+    quoted_unit_price: float | None = Field(default=None, alias="quotedUnitPrice")
 
 
 class RequestCreate(BaseModel):
@@ -26,7 +31,9 @@ class RequestCreate(BaseModel):
     vendor_name: str = Field(alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int = Field(alias="commodityGroupId")
-    total_cost: float = Field(alias="totalCost")
+    # Ignored: the server computes sum of lines + tax.
+    total_cost: float | None = Field(default=None, alias="totalCost")
+    tax_amount: float | None = Field(default=None, alias="taxAmount", ge=0)
     department: str | None = None
     order_lines: list[OrderLineIn] = Field(alias="orderLines", min_length=1)
 
@@ -37,7 +44,9 @@ class RequestUpdate(BaseModel):
     vendor_name: str = Field(alias="vendorName")
     vat_id: str | None = Field(default=None, alias="vatId")
     commodity_group_id: int = Field(alias="commodityGroupId")
-    total_cost: float = Field(alias="totalCost")
+    # Ignored: the server computes sum of lines + tax.
+    total_cost: float | None = Field(default=None, alias="totalCost")
+    tax_amount: float | None = Field(default=None, alias="taxAmount", ge=0)
     department: str | None = None
     order_lines: list[OrderLineIn] = Field(alias="orderLines")
 
@@ -73,6 +82,8 @@ class OrderLineOut(BaseModel):
     unit: str
     total_price: float
     line_order: int
+    article_id: uuid.UUID | None = None
+    quoted_unit_price: float | None = None
     created_at: datetime
 
 
@@ -106,6 +117,8 @@ class RequestOut(BaseModel):
     approved_by: uuid.UUID | None
     approved_at: datetime | None
     total_cost: float | None
+    tax_amount: float | None = None
+    approval_source: Literal["auto", "manual"] | None = None
     created_at: datetime
     updated_at: datetime
     order_lines: list[OrderLineOut]
@@ -114,3 +127,26 @@ class RequestOut(BaseModel):
     commodity_groups: CommodityGroupOut | None = Field(
         default=None, validation_alias="commodity_group"
     )
+
+
+# --- Booking rule preview (POST /requests/booking-rule-preview) -----------------------------
+
+
+class BookingPreviewLine(BaseModel):
+    description: str
+    total_price: float = 0
+
+
+class BookingPreviewRequest(BaseModel):
+    lines: list[BookingPreviewLine] = Field(max_length=200)
+
+
+class AppliedBookingRule(BaseModel):
+    id: str
+    label: str
+    commodity_group_id: int
+    commodity_group_name: str
+
+
+class BookingPreviewResponse(BaseModel):
+    rule: AppliedBookingRule | None

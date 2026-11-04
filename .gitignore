@@ -4,7 +4,8 @@
 !.env.example
 
 # Working notes kept outside the deliverable
-docs/
+docs/archive/
+PLAN.md
 
 # Python
 __pycache__/

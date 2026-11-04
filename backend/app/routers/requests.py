@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, status
 from sqlalchemy import select
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.deps import get_current_membership, require_buyer_or_admin
 from app.db.session import get_db
 from app.models import (
+    Article,
     CommodityGroup,
     OrderLine,
     Organization,
@@ -17,13 +19,20 @@ from app.models import (
     RequestDocument,
 )
 from app.schemas.requests import (
+    AppliedBookingRule,
     ApprovalDecision,
+    BookingPreviewRequest,
+    BookingPreviewResponse,
+    OrderLineIn,
     RequestActivityOut,
     RequestCreate,
     RequestOut,
     RequestUpdate,
     StatusUpdate,
 )
+from app.services.approval_policy import auto_approves, needs_reapproval, policy_for
+from app.services.booking_rules import match_rule, rules_for
+from app.services.totals import line_total, request_total
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -37,6 +46,7 @@ _FIELD_LABELS = {
     "vat_id": "tax ID",
     "commodity_group_id": "commodity group",
     "total_cost": "total cost",
+    "tax_amount": "tax",
     "department": "department",
     "order_lines": "order lines",
 }
@@ -95,7 +105,7 @@ def _enforce_required_fields(
 def _log_activity(
     db: Session,
     request_id: uuid.UUID,
-    actor_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
     action: str,
     summary: str,
     detail: dict | None = None,
@@ -107,7 +117,105 @@ def _log_activity(
             action=action,
             summary=summary,
             detail=detail,
+            # Stamped here, not by Postgres now() (transaction start): keeps entries in order.
+            created_at=datetime.now(timezone.utc),
         )
+    )
+
+
+def _build_order_lines(
+    lines: list[OrderLineIn], organization_id: uuid.UUID, db: Session
+) -> tuple[list[OrderLine], list[tuple[str, dict]]]:
+    """Order lines from the payload, plus an activity note per catalog line.
+
+    A catalog line (``article_id`` set) gets its unit price and unit from the catalog, never
+    from the browser, so a "negotiated price" can't be faked. The article must belong to the
+    caller's organisation; otherwise 404.
+    """
+    built: list[OrderLine] = []
+    notes: list[tuple[str, dict]] = []
+    for index, line in enumerate(lines, start=1):
+        unit_price, unit = line.unit_price, line.unit
+        if line.article_id is not None:
+            article = db.scalar(
+                select(Article).where(
+                    Article.id == line.article_id, Article.organization_id == organization_id
+                )
+            )
+            if article is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail="Catalog article not found"
+                )
+            negotiated = Decimal(str(article.unit_price))
+            unit_price, unit = negotiated, article.unit
+            quoted = (
+                f" (quoted ${line.quoted_unit_price:,.2f})" if line.quoted_unit_price else ""
+            )
+            notes.append((
+                f"Line {index} uses catalog article {article.article_number} "
+                f"at the negotiated ${negotiated:,.2f} / {unit}{quoted}",
+                {
+                    "line": index,
+                    "article_id": str(article.id),
+                    "negotiated_unit_price": str(negotiated),
+                    "quoted_unit_price": line.quoted_unit_price,
+                },
+            ))
+        total_price = line_total(unit_price, line.amount)  # never the browser's total
+        built.append(
+            OrderLine(
+                position_description=line.position_description,
+                unit_price=unit_price,
+                amount=line.amount,
+                unit=unit,
+                total_price=total_price,
+                line_order=index,
+                article_id=line.article_id,
+                quoted_unit_price=line.quoted_unit_price if line.article_id else None,
+            )
+        )
+    return built, notes
+
+
+def _apply_booking_rule(
+    db: Session, organization_id: uuid.UUID, lines: list[OrderLine], chosen_group_id: int
+) -> tuple[int, tuple[str, dict] | None]:
+    """The group to store: a matching org booking rule always beats the AI's or user's choice.
+
+    Returns the group id and, if a rule applied, an activity note. Line totals come from the
+    stored lines, not from the browser's request total.
+    """
+    rule = match_rule(
+        [(line.position_description, Decimal(str(line.total_price))) for line in lines],
+        rules_for(db, organization_id),
+    )
+    group = db.get(CommodityGroup, rule.commodity_group_id) if rule else None
+    if rule is None or group is None:
+        return chosen_group_id, None
+    was = db.get(CommodityGroup, chosen_group_id)
+    summary = f"Booked to {group.name} by the rule '{rule.label}'"
+    if was is not None and was.id != group.id:
+        summary += f" (was {was.name})"
+    return group.id, (summary, {"rule_id": rule.id, "was_commodity_group_id": chosen_group_id})
+
+
+def _apply_auto_approval(db: Session, request: ProcurementRequest) -> None:
+    """Approve a pending request whose total is under the organisation's limit."""
+    if request.approval_status != "pending":
+        return
+    policy = policy_for(db, request.organization_id)
+    total = Decimal(str(request.total_cost))
+    if not auto_approves(total, policy):
+        return
+    request.approval_status = "approved"
+    request.approval_source = "auto"
+    request.approved_by = None  # no person decided
+    request.approved_at = datetime.now(timezone.utc)
+    limit = Decimal(str(policy.below_amount))
+    _log_activity(
+        db, request.id, None, "auto_approved",
+        f"Auto-approved: ${total:,.2f} is under the ${limit:,.0f} limit",
+        {"total": str(total), "limit": str(limit)},
     )
 
 
@@ -124,7 +232,12 @@ def _order_lines_signature(lines) -> list[tuple]:
     ]
 
 
-def _changed_fields(request: ProcurementRequest, payload: RequestUpdate) -> list[str]:
+def _changed_fields(
+    request: ProcurementRequest,
+    payload: RequestUpdate,
+    new_lines: list[OrderLine],
+    new_total: Decimal,
+) -> list[str]:
     """Return the field keys whose value differs between the request and payload."""
     changed: list[str] = []
     if request.requestor_name != payload.requestor_name:
@@ -137,15 +250,17 @@ def _changed_fields(request: ProcurementRequest, payload: RequestUpdate) -> list
         changed.append("vat_id")
     if request.commodity_group_id != payload.commodity_group_id:
         changed.append("commodity_group_id")
-    if float(request.total_cost or 0) != float(payload.total_cost or 0):
+    if Decimal(str(request.total_cost or 0)) != new_total:
         changed.append("total_cost")
+    if Decimal(str(request.tax_amount or 0)) != Decimal(str(payload.tax_amount or 0)):
+        changed.append("tax_amount")
     if (request.department or "") != (payload.department or ""):
         changed.append("department")
     old_lines = _order_lines_signature(
         sorted(request.order_lines, key=lambda line: line.line_order)
     )
-    new_lines = _order_lines_signature(payload.order_lines)
-    if old_lines != new_lines:
+    # Compare with the lines as they will be stored (catalog prices already applied).
+    if old_lines != _order_lines_signature(new_lines):
         changed.append("order_lines")
     return changed
 
@@ -175,6 +290,25 @@ def get_request(
     )
 
 
+@router.post("/booking-rule-preview", response_model=BookingPreviewResponse)
+def preview_booking_rule(
+    payload: BookingPreviewRequest,
+    membership: OrganizationMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+) -> BookingPreviewResponse:
+    """Which org booking rule would apply to these lines (the form locks the group)."""
+    rule = match_rule(
+        [(line.description, Decimal(str(line.total_price))) for line in payload.lines],
+        rules_for(db, membership.organization_id),
+    )
+    group = db.get(CommodityGroup, rule.commodity_group_id) if rule else None
+    if rule is None or group is None:
+        return BookingPreviewResponse(rule=None)
+    return BookingPreviewResponse(rule=AppliedBookingRule(
+        id=rule.id, label=rule.label, commodity_group_id=group.id, commodity_group_name=group.name
+    ))
+
+
 @router.post("", response_model=RequestOut, status_code=status.HTTP_201_CREATED)
 def create_request(
     payload: RequestCreate,
@@ -193,26 +327,29 @@ def create_request(
         vendor_name=payload.vendor_name,
         vat_id=payload.vat_id,
         commodity_group_id=payload.commodity_group_id,
-        total_cost=payload.total_cost,
+        tax_amount=payload.tax_amount,
         department=payload.department,
         organization_id=membership.organization_id,
         created_by=membership.user_id,
         status="open",
     )
-    request.order_lines = [
-        OrderLine(
-            position_description=line.position_description,
-            unit_price=line.unit_price,
-            amount=line.amount,
-            unit=line.unit,
-            total_price=line.total_price,
-            line_order=index + 1,
-        )
-        for index, line in enumerate(payload.order_lines)
-    ]
+    request.order_lines, catalog_notes = _build_order_lines(
+        payload.order_lines, membership.organization_id, db
+    )
+    request.commodity_group_id, booking_note = _apply_booking_rule(
+        db, membership.organization_id, request.order_lines, payload.commodity_group_id
+    )
+    request.total_cost = request_total(
+        (line.total_price for line in request.order_lines), payload.tax_amount
+    )
     db.add(request)
     db.flush()
     _log_activity(db, request.id, membership.user_id, "created", "Request created")
+    if booking_note:
+        _log_activity(db, request.id, membership.user_id, "booking_rule", *booking_note)
+    for summary, detail in catalog_notes:
+        _log_activity(db, request.id, membership.user_id, "catalog_article", summary, detail)
+    _apply_auto_approval(db, request)
     db.commit()
 
     request = _get_org_request(db, request.id, membership.organization_id)
@@ -230,28 +367,38 @@ def update_request(
     _validate_commodity_group(db, payload.commodity_group_id)
     _enforce_required_fields(db, membership.organization_id, payload)
 
-    changed = _changed_fields(request, payload)
+    new_lines, catalog_notes = _build_order_lines(
+        payload.order_lines, membership.organization_id, db
+    )
+    group_id, booking_note = _apply_booking_rule(
+        db, membership.organization_id, new_lines, payload.commodity_group_id
+    )
+    overridden = group_id != payload.commodity_group_id
+    payload = payload.model_copy(update={"commodity_group_id": group_id})
+    new_total = request_total((line.total_price for line in new_lines), payload.tax_amount)
+    changed = _changed_fields(request, payload, new_lines, new_total)
+    already_linked = {line.article_id for line in request.order_lines if line.article_id}
 
     request.requestor_name = payload.requestor_name
     request.title = payload.title
     request.vendor_name = payload.vendor_name
     request.vat_id = payload.vat_id
     request.commodity_group_id = payload.commodity_group_id
-    request.total_cost = payload.total_cost
+    request.total_cost = new_total
+    request.tax_amount = payload.tax_amount
     request.department = payload.department
 
     # Replace order lines (same semantics as the original delete-and-insert).
-    request.order_lines = [
-        OrderLine(
-            position_description=line.position_description,
-            unit_price=line.unit_price,
-            amount=line.amount,
-            unit=line.unit,
-            total_price=line.total_price,
-            line_order=index + 1,
-        )
-        for index, line in enumerate(payload.order_lines)
-    ]
+    request.order_lines = new_lines
+
+    # Log a rule only when it overrode the group chosen in this edit.
+    if booking_note and overridden:
+        _log_activity(db, request.id, membership.user_id, "booking_rule", *booking_note)
+
+    # Log only articles newly linked by this edit.
+    for summary, detail in catalog_notes:
+        if uuid.UUID(detail["article_id"]) not in already_linked:
+            _log_activity(db, request.id, membership.user_id, "catalog_article", summary, detail)
 
     if changed:
         labels = [_FIELD_LABELS.get(f, f) for f in changed]
@@ -263,6 +410,21 @@ def update_request(
             f"Updated {', '.join(labels)}",
             {"changed_fields": changed},
         )
+
+    # A money or vendor change voids an approval; then the policy is checked again.
+    if needs_reapproval(changed):
+        if request.approval_status == "approved":
+            request.approval_status = "pending"
+            request.approval_source = None
+            request.approved_by = None
+            request.approved_at = None
+            material = [_FIELD_LABELS[f] for f in changed if needs_reapproval([f])]
+            _log_activity(
+                db, request.id, membership.user_id, "approval_reset",
+                f"Back to pending: {', '.join(material)} changed after approval",
+                {"changed_fields": changed},
+            )
+        _apply_auto_approval(db, request)
     db.commit()
 
     request = _get_org_request(db, request_id, membership.organization_id)
@@ -311,6 +473,7 @@ def decide_approval(
         )
 
     request.approval_status = payload.decision
+    request.approval_source = "manual"
     request.approved_by = membership.user_id
     request.approved_at = datetime.now(timezone.utc)
     _log_activity(
