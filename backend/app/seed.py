@@ -52,6 +52,22 @@ ORG_ACCOUNTS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
 ]
 
 
+# Demo profile departments, prefilled on New Request. The other accounts stay empty,
+# so the demo also shows the fallback to the department extracted from the quote.
+DEMO_DEPARTMENTS = {"requester@acme.com": "Facilities"}
+
+
+def seed_demo_departments(db: Session) -> int:
+    """Set demo departments on profiles that have none (also fills existing databases)."""
+    updated = 0
+    for email, department in DEMO_DEPARTMENTS.items():
+        profile = db.scalar(select(Profile).where(Profile.email == email))
+        if profile is not None and not profile.department:
+            profile.department = department
+            updated += 1
+    return updated
+
+
 def seed_commodity_groups(db: Session) -> int:
     """Insert commodity groups that aren't already present (keyed by id)."""
     existing = set(db.scalars(select(CommodityGroup.id)))
@@ -181,6 +197,7 @@ def seed(db: Session) -> dict[str, int]:
         "articles": seed_articles(db, dev_org_id) if dev_org_id else 0,
         "organizations": orgs_created,
         "users": users_created,
+        "demo_departments": seed_demo_departments(db),
     }
     db.commit()
     return counts

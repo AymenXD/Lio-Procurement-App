@@ -408,6 +408,15 @@ def test_pdf_parse():
     )
     assert r.status_code == 400
 
+    # non-PDF disguised as a PDF (fake content type) rejected by its signature
+    r = client.post(
+        "/pdf/parse",
+        files={"file": ("offer.pdf", b"MZ\x90\x00 not a pdf", "application/pdf")},
+        headers=_auth(token),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "This file is not a valid PDF"
+
 
 def test_activity_log_and_document():
     from pypdf import PdfWriter

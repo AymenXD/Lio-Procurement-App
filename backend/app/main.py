@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -12,6 +14,9 @@ from app.routers import (
     requests,
     suppliers,
 )
+
+# Show the app's INFO logs (e.g. AI call duration and tokens) in the container output.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 
 def create_app() -> FastAPI:
