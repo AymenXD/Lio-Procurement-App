@@ -1,6 +1,8 @@
 import logging
 import re
 import time
+import uuid
+from decimal import Decimal
 
 from openai import APITimeoutError, RateLimitError
 from sqlalchemy import select
@@ -10,6 +12,7 @@ from app.core.config import settings
 from app.models import CommodityGroup
 from app.schemas.extraction import ExtractedVendorData, ExtractionResponse, QuoteExtraction
 from app.services.ai import get_client
+from app.services.booking_rules import match_rule, rules_for
 from app.services.reconciliation import check_numbers
 
 logger = logging.getLogger(__name__)
@@ -87,7 +90,9 @@ def _same_company(a: str, b: str) -> bool:
     return bool(norm(a)) and norm(a) == norm(b)
 
 
-def extract_vendor_data(pdf_text: str, db: Session) -> ExtractionResponse:
+def extract_vendor_data(
+    pdf_text: str, db: Session, organization_id: uuid.UUID | None = None
+) -> ExtractionResponse:
     """Extract vendor data and classify the commodity group in one AI call."""
     if not pdf_text or not pdf_text.strip():
         return ExtractionResponse(success=False, error="No text provided for extraction")
@@ -178,9 +183,20 @@ def extract_vendor_data(pdf_text: str, db: Session) -> ExtractionResponse:
             if "Commodity Group" not in missing_fields:
                 missing_fields.append("Commodity Group")
 
+    # The organisation's booking rules beat the AI's classification (also enforced on save).
+    lines = [(ln.position_description, Decimal(str(ln.total_price)))
+             for ln in extracted.order_lines]
+    rule = match_rule(lines, rules_for(db, organization_id))
+    group = next((g for g in commodity_groups if rule and g.id == rule.commodity_group_id), None)
+    if rule and group:
+        extracted.commodity_group_id, extracted.commodity_group_name = group.id, group.name
+        if "Commodity Group" in missing_fields:
+            missing_fields.remove("Commodity Group")
+
     return ExtractionResponse(
         success=True,
         data=extracted,
         missing_fields=missing_fields or None,
         warnings=check_numbers(extracted) or None,
+        applied_rule=rule.label if rule and group else None,
     )

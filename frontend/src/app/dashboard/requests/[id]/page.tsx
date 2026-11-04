@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import * as api from '@/lib/api';
 import { Button, Input, Alert } from '@/components/base';
-import { useCommodityGroups } from '@/lib/hooks/useCommodityGroups';
+import { CommodityGroupPicker } from '@/components/CommodityGroupPicker';
 import type { ProcurementRequestWithDetails } from '@/types/database';
 
 const STATUS_BADGE: Record<string, string> = {
@@ -25,7 +25,6 @@ const usd = (n: number | null) =>
 export default function RequestDetailPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
-  const { data: commodityGroups } = useCommodityGroups();
 
   const [request, setRequest] = useState<ProcurementRequestWithDetails | null>(null);
   const [activity, setActivity] = useState<api.RequestActivity[]>([]);
@@ -346,16 +345,12 @@ export default function RequestDetailPage() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-ink/70 mb-1.5">Commodity Group *</label>
-                <select
-                  value={form.commodityGroupId || ''}
-                  onChange={(e) => setForm({ ...form, commodityGroupId: Number(e.target.value) })}
-                  className="w-full h-11 px-3.5 border border-line rounded-xl text-sm text-ink bg-white focus:outline-none focus:ring-2 focus:ring-accent-deep/60"
-                >
-                  <option value="">Select a commodity group</option>
-                  {commodityGroups?.map((g) => (
-                    <option key={g.id} value={g.id}>{g.id} - {g.category} - {g.name}</option>
-                  ))}
-                </select>
+                {/* Booking rules still apply on save (server-side). */}
+                <CommodityGroupPicker
+                  value={form.commodityGroupId}
+                  onChange={(id) => setForm({ ...form, commodityGroupId: id })}
+                  required
+                />
               </div>
               <Input label="Total Cost ($) *" type="number" step="0.01" value={form.totalCost}
                 onChange={(e) => setForm({ ...form, totalCost: parseFloat(e.target.value) || 0 })} />

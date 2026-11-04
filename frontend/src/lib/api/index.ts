@@ -45,8 +45,25 @@ export interface MyOrganization {
 // Request fields an org may optionally mark as required (see backend settings).
 export type ConfigurableRequiredField = 'vat_id' | 'department';
 
+// A tenant's categorisation rule: matching lines are always booked to its commodity group.
+export interface BookingRule {
+  id: string;
+  label: string;
+  keywords: string[];
+  commodity_group_id: number;
+  max_total: number | null; // rule applies only if the request total is below this
+}
+
 export interface OrganizationSettings {
   required_fields: ConfigurableRequiredField[];
+  booking_rules: BookingRule[];
+}
+
+export interface AppliedBookingRule {
+  id: string;
+  label: string;
+  commodity_group_id: number;
+  commodity_group_name: string;
 }
 
 export interface MembersResponse {
@@ -184,6 +201,13 @@ export const requests = {
     return apiFetch('/requests');
   },
 
+  /** Which booking rule (if any) the server will apply to these lines. */
+  bookingRulePreview(
+    lines: { description: string; total_price: number }[]
+  ): Promise<{ rule: AppliedBookingRule | null }> {
+    return apiFetch('/requests/booking-rule-preview', { body: { lines } });
+  },
+
   get(requestId: string): Promise<ProcurementRequestWithDetails> {
     return apiFetch(`/requests/${requestId}`);
   },
@@ -263,7 +287,8 @@ export const organizations = {
     return apiFetch('/organizations/me/settings');
   },
 
-  updateSettings(settings: OrganizationSettings): Promise<OrganizationSettings> {
+  /** The server merges: send only the fields you change. */
+  updateSettings(settings: Partial<OrganizationSettings>): Promise<OrganizationSettings> {
     return apiFetch('/organizations/me/settings', { method: 'PATCH', body: settings });
   },
 };

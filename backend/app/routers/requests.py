@@ -19,7 +19,10 @@ from app.models import (
     RequestDocument,
 )
 from app.schemas.requests import (
+    AppliedBookingRule,
     ApprovalDecision,
+    BookingPreviewRequest,
+    BookingPreviewResponse,
     OrderLineIn,
     RequestActivityOut,
     RequestCreate,
@@ -27,6 +30,7 @@ from app.schemas.requests import (
     RequestUpdate,
     StatusUpdate,
 )
+from app.services.booking_rules import match_rule, rules_for
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -168,6 +172,28 @@ def _build_order_lines(
     return built, notes
 
 
+def _apply_booking_rule(
+    db: Session, organization_id: uuid.UUID, lines: list[OrderLine], chosen_group_id: int
+) -> tuple[int, tuple[str, dict] | None]:
+    """The group to store: a matching org booking rule always beats the AI's or user's choice.
+
+    Returns the group id and, if a rule applied, an activity note. Line totals come from the
+    stored lines, not from the browser's request total.
+    """
+    rule = match_rule(
+        [(line.position_description, Decimal(str(line.total_price))) for line in lines],
+        rules_for(db, organization_id),
+    )
+    group = db.get(CommodityGroup, rule.commodity_group_id) if rule else None
+    if rule is None or group is None:
+        return chosen_group_id, None
+    was = db.get(CommodityGroup, chosen_group_id)
+    summary = f"Booked to {group.name} by the rule '{rule.label}'"
+    if was is not None and was.id != group.id:
+        summary += f" (was {was.name})"
+    return group.id, (summary, {"rule_id": rule.id, "was_commodity_group_id": chosen_group_id})
+
+
 def _order_lines_signature(lines) -> list[tuple]:
     return [
         (
@@ -234,6 +260,25 @@ def get_request(
     )
 
 
+@router.post("/booking-rule-preview", response_model=BookingPreviewResponse)
+def preview_booking_rule(
+    payload: BookingPreviewRequest,
+    membership: OrganizationMember = Depends(get_current_membership),
+    db: Session = Depends(get_db),
+) -> BookingPreviewResponse:
+    """Which org booking rule would apply to these lines (the form locks the group)."""
+    rule = match_rule(
+        [(line.description, Decimal(str(line.total_price))) for line in payload.lines],
+        rules_for(db, membership.organization_id),
+    )
+    group = db.get(CommodityGroup, rule.commodity_group_id) if rule else None
+    if rule is None or group is None:
+        return BookingPreviewResponse(rule=None)
+    return BookingPreviewResponse(rule=AppliedBookingRule(
+        id=rule.id, label=rule.label, commodity_group_id=group.id, commodity_group_name=group.name
+    ))
+
+
 @router.post("", response_model=RequestOut, status_code=status.HTTP_201_CREATED)
 def create_request(
     payload: RequestCreate,
@@ -261,9 +306,14 @@ def create_request(
     request.order_lines, catalog_notes = _build_order_lines(
         payload.order_lines, membership.organization_id, db
     )
+    request.commodity_group_id, booking_note = _apply_booking_rule(
+        db, membership.organization_id, request.order_lines, payload.commodity_group_id
+    )
     db.add(request)
     db.flush()
     _log_activity(db, request.id, membership.user_id, "created", "Request created")
+    if booking_note:
+        _log_activity(db, request.id, membership.user_id, "booking_rule", *booking_note)
     for summary, detail in catalog_notes:
         _log_activity(db, request.id, membership.user_id, "catalog_article", summary, detail)
     db.commit()
@@ -286,6 +336,11 @@ def update_request(
     new_lines, catalog_notes = _build_order_lines(
         payload.order_lines, membership.organization_id, db
     )
+    group_id, booking_note = _apply_booking_rule(
+        db, membership.organization_id, new_lines, payload.commodity_group_id
+    )
+    overridden = group_id != payload.commodity_group_id
+    payload = payload.model_copy(update={"commodity_group_id": group_id})
     changed = _changed_fields(request, payload, new_lines)
     already_linked = {line.article_id for line in request.order_lines if line.article_id}
 
@@ -299,6 +354,10 @@ def update_request(
 
     # Replace order lines (same semantics as the original delete-and-insert).
     request.order_lines = new_lines
+
+    # Log a rule only when it overrode the group chosen in this edit.
+    if booking_note and overridden:
+        _log_activity(db, request.id, membership.user_id, "booking_rule", *booking_note)
 
     # Log only articles newly linked by this edit.
     for summary, detail in catalog_notes:

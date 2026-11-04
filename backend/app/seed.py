@@ -52,6 +52,32 @@ ORG_ACCOUNTS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
 ]
 
 
+# Groups a customer needs that the generated taxonomy lacks (it can't be edited by hand).
+# Acme books small software subscriptions to "Office Supplies".
+EXTRA_COMMODITY_GROUPS = [(2001, "Office & Administration", "Office Supplies")]
+
+# Acme's booking rules (editable by Acme admins in Organization → Settings). "Small" software
+# subscriptions = below $2,000, the same limit Acme uses for "doesn't need approval".
+ACME_BOOKING_RULES = [
+    {"id": "cable-ties", "label": "Cable ties", "keywords": ["cable tie", "zip tie"],
+     "commodity_group_id": 11, "max_total": None},
+    {"id": "printer-toner", "label": "Printer toner", "keywords": ["toner"],
+     "commodity_group_id": 29, "max_total": None},
+    {"id": "small-software", "label": "Small software subscriptions",
+     "keywords": ["subscription", "saas", "software license"],
+     "commodity_group_id": 2001, "max_total": 2000},
+]
+
+
+def seed_booking_rules(db: Session, organization: Organization) -> int:
+    """Give Acme its rules once. Never overwrites rules an admin has edited."""
+    settings = organization.settings or {}
+    if "booking_rules" in settings:
+        return 0
+    organization.settings = {**settings, "booking_rules": ACME_BOOKING_RULES}
+    return len(ACME_BOOKING_RULES)
+
+
 # Demo profile departments, prefilled on New Request. The other accounts stay empty,
 # so the demo also shows the fallback to the department extracted from the quote.
 DEMO_DEPARTMENTS = {"requester@acme.com": "Facilities"}
@@ -73,7 +99,7 @@ def seed_commodity_groups(db: Session) -> int:
     existing = set(db.scalars(select(CommodityGroup.id)))
     new = [
         CommodityGroup(id=cg_id, category=category, name=name)
-        for cg_id, category, name in COMMODITY_GROUPS
+        for cg_id, category, name in [*COMMODITY_GROUPS, *EXTRA_COMMODITY_GROUPS]
         if cg_id not in existing
     ]
     db.add_all(new)
@@ -198,6 +224,7 @@ def seed(db: Session) -> dict[str, int]:
         "organizations": orgs_created,
         "users": users_created,
         "demo_departments": seed_demo_departments(db),
+        "booking_rules": seed_booking_rules(db, dev_org) if dev_org else 0,
     }
     db.commit()
     return counts
